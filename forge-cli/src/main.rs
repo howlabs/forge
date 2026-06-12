@@ -1,14 +1,58 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use forge_core::event_loop::EventLoop;
-use forge_provider::anthropic::AnthropicProvider;
-use forge_context::ContextEngine;
-use forge_sandbox::Sandbox;
+use forge_tui::{SimpleTui, TuiConfig};
+use provider::anthropic::AnthropicProvider;
+use provider::openai::OpenAIProvider;
+use provider::gemini::GeminiProvider;
+use provider::local::LocalProvider;
+use provider::ModelProvider;
+use provider::types::{Message, MessageRole};
+use context::ContextEngine;
+use sandbox::Sandbox;
 use tracing_subscriber::EnvFilter;
+use std::sync::Arc;
 
 mod exec;
 
-use exec::{run_exec, ExecConfig, ExecResult};
+use exec::{run_exec, ExecConfig};
+
+/// Supported model providers
+#[derive(Debug, Clone, PartialEq)]
+enum ProviderType {
+    Anthropic,
+    OpenAI,
+    Zai,
+    Gemini,
+    Local,
+}
+
+impl std::str::FromStr for ProviderType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "anthropic" => Ok(ProviderType::Anthropic),
+            "openai" => Ok(ProviderType::OpenAI),
+            "zai" | "z.ai" | "glm" => Ok(ProviderType::Zai),
+            "gemini" => Ok(ProviderType::Gemini),
+            "local" => Ok(ProviderType::Local),
+            _ => anyhow::bail!("Unknown provider: {}", s),
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderType::Anthropic => write!(f, "anthropic"),
+            ProviderType::OpenAI => write!(f, "openai"),
+            ProviderType::Zai => write!(f, "zai"),
+            ProviderType::Gemini => write!(f, "gemini"),
+            ProviderType::Local => write!(f, "local"),
+        }
+    }
+}
 
 /// Forge - An open-source CLI coding agent
 #[derive(Parser, Debug)]
@@ -35,8 +79,12 @@ enum Commands {
         #[arg(short, long)]
         api_key: String,
 
+        /// Model provider (anthropic, openai, zai, gemini, local)
+        #[arg(long, default_value = "zai")]
+        provider: String,
+
         /// Model to use
-        #[arg(short, long, default_value = "claude-sonnet-4-20250514")]
+        #[arg(short, long, default_value = "glm-5.1")]
         model: String,
 
         /// Network access mode (off, restricted, full)
@@ -46,6 +94,14 @@ enum Commands {
         /// Resume a task from checkpoint (v0.180.0)
         #[arg(long, value_name = "TASK_ID")]
         resume: Option<String>,
+
+        /// Launch TUI mode (interactive terminal UI)
+        #[arg(long, default_value_t = false)]
+        tui: bool,
+
+        /// Force plain mode even when in TTY
+        #[arg(long, default_value_t = false)]
+        plain: bool,
     },
     /// Headless exec mode for CI/CD
     Exec {
@@ -64,8 +120,12 @@ enum Commands {
         #[arg(short, long)]
         api_key: String,
 
+        /// Model provider (anthropic, openai, zai, gemini, local)
+        #[arg(long, default_value = "zai")]
+        provider: String,
+
         /// Model to use
-        #[arg(short, long, default_value = "claude-sonnet-4-20250514")]
+        #[arg(short, long, default_value = "glm-5.1")]
         model: String,
 
         /// Run verify loop
@@ -95,9 +155,12 @@ async fn main() -> Result<()> {
             project_path,
             config: _,
             api_key,
+            provider,
             model,
             network,
             resume,
+            tui,
+            plain,
         } => {
             tracing::info!("Forge v{} starting (REPL mode)", env!("CARGO_PKG_VERSION"));
 
@@ -106,18 +169,26 @@ async fn main() -> Result<()> {
                 return resume_task(&task_id, &project_path);
             }
 
-            // Initialize provider (v0.100.0: Anthropic only)
-            let provider = AnthropicProvider::new(api_key, model)?;
+            // Parse provider type
+            let provider_type = provider.parse::<ProviderType>()?;
 
             // Initialize context engine (minimal: AGENTS.md loading)
             let context = ContextEngine::new(project_path.clone())?;
 
             // Initialize sandbox with network-off by default
-            let sandbox = Sandbox::new(project_path, network)?;
+            let sandbox = Sandbox::new(project_path.clone(), network)?;
 
-            // Create and run event loop
-            let mut event_loop = EventLoop::new(provider, context, sandbox);
-            event_loop.run().await?;
+            // Determine mode: TUI, plain, or auto-detect
+            let is_tty = atty::is(atty::Stream::Stdout);
+            let use_tui = tui || (is_tty && !plain);
+
+            if use_tui {
+                tracing::info!("Launching TUI mode with {} provider", provider);
+                launch_tui_mode(provider_type, model, api_key, context, sandbox, project_path).await?;
+            } else {
+                tracing::info!("Launching plain REPL mode with {} provider", provider);
+                launch_plain_mode(provider_type, model, api_key, context, sandbox).await?;
+            }
 
             Ok(())
         }
@@ -126,6 +197,7 @@ async fn main() -> Result<()> {
             project_path: _,
             config: _,
             api_key: _,
+            provider: _,
             model: _,
             verify,
             format,
@@ -154,10 +226,115 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Launch TUI mode with configured provider
+async fn launch_tui_mode(
+    provider_type: ProviderType,
+    model: String,
+    api_key: String,
+    context: ContextEngine,
+    sandbox: Sandbox,
+    project_path: String,
+) -> Result<()> {
+    use std::io::stdout;
+
+    // Create provider based on type
+    let provider: Arc<dyn ModelProvider> = match provider_type {
+        ProviderType::Anthropic => {
+            tracing::info!("Creating Anthropic provider with model: {}", model);
+            Arc::new(AnthropicProvider::new(api_key, model)?)
+        }
+        ProviderType::OpenAI => {
+            tracing::info!("Creating OpenAI provider with model: {}", model);
+            Arc::new(OpenAIProvider::new(model, api_key))
+        }
+        ProviderType::Zai => {
+            tracing::info!("Creating Z.AI provider with model: {}", model);
+            Arc::new(OpenAIProvider::with_base_url(
+                model,
+                api_key,
+                "https://api.z.ai/api/coding/paas/v4/chat/completions"
+            ))
+        }
+        ProviderType::Gemini => {
+            tracing::info!("Creating Gemini provider with model: {}", model);
+            Arc::new(GeminiProvider::new(model, api_key))
+        }
+        ProviderType::Local => {
+            tracing::info!("Creating Local provider with model: {}", model);
+            Arc::new(LocalProvider::new_ollama("http://localhost:11434", model))
+        }
+    };
+
+    // Initialize TUI configuration
+    let config = TuiConfig {
+        fullscreen: false,
+        show_agent_panel: true,
+        ..Default::default()
+    };
+
+    tracing::info!("Starting TUI with {} provider", provider_type);
+    tracing::info!("Project path: {}", project_path);
+
+    // Create and run TUI
+    let mut tui = SimpleTui::new(config, provider);
+    tui.run().await?;
+
+    Ok(())
+}
+
+/// Launch plain REPL mode with configured provider
+async fn launch_plain_mode(
+    provider_type: ProviderType,
+    model: String,
+    api_key: String,
+    context: ContextEngine,
+    sandbox: Sandbox,
+) -> Result<()> {
+    // Run event loop with selected provider
+    match provider_type {
+        ProviderType::Anthropic => {
+            tracing::info!("Using Anthropic provider with model: {}", model);
+            let provider = AnthropicProvider::new(api_key, model)?;
+            let mut event_loop = EventLoop::new(provider, context, sandbox);
+            event_loop.run().await?;
+        }
+        ProviderType::OpenAI => {
+            tracing::info!("Using OpenAI provider with model: {}", model);
+            let provider = OpenAIProvider::new(model, api_key);
+            let mut event_loop = EventLoop::new(provider, context, sandbox);
+            event_loop.run().await?;
+        }
+        ProviderType::Zai => {
+            tracing::info!("Using Z.AI provider with model: {}", model);
+            let provider = OpenAIProvider::with_base_url(
+                model,
+                api_key,
+                "https://api.z.ai/api/coding/paas/v4/chat/completions"
+            );
+            let mut event_loop = EventLoop::new(provider, context, sandbox);
+            event_loop.run().await?;
+        }
+        ProviderType::Gemini => {
+            tracing::info!("Using Gemini provider with model: {}", model);
+            let provider = GeminiProvider::new(model, api_key);
+            let mut event_loop = EventLoop::new(provider, context, sandbox);
+            event_loop.run().await?;
+        }
+        ProviderType::Local => {
+            tracing::info!("Using Local provider with model: {}", model);
+            let provider = LocalProvider::new_ollama("http://localhost:11434", model);
+            let mut event_loop = EventLoop::new(provider, context, sandbox);
+            event_loop.run().await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Resume a task from checkpoint (v0.180.0)
 fn resume_task(task_id: &str, project_path: &str) -> Result<()> {
-    use forge_agents::{CheckpointStore, Checkpoint};
-    use forge_verify::FileCheckpointStore;
+    
+    use verify::FileCheckpointStore;
     use std::path::PathBuf;
 
     tracing::info!("Resuming task {} from checkpoint", task_id);

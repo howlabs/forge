@@ -5,11 +5,12 @@ edition.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
-forge-provider = { path = "../forge-provider" }
-forge-context = { path = "../forge-context" }
-forge-sandbox = { path = "../forge-sandbox" }
-forge-verify = { path = "../forge-verify" }
-forge-agents = { path = "../forge-agents" }
+forge-tui = { path = "../forge-tui" }
+provider = { path = "../provider" }
+context = { path = "../context" }
+sandbox = { path = "../sandbox" }
+verify = { path = "../verify" }
+agents = { path = "../agents" }
 
 clap = { workspace = true }
 anyhow = { workspace = true }
@@ -19,6 +20,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1.6", features = ["v4"] }
+atty = "0.2"
 
 [[bin]]
 name = "forge"

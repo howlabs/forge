@@ -13,10 +13,10 @@ mod integration_tests {
     use super::*;
     use crate::file_watcher::FileWatcher;
     use crate::event_loop::EventLoop;
-    use forge_context::{MockContextIndex, ContextIndex, SymbolKind};
-    use forge_provider::anthropic::AnthropicProvider;
-    use forge_sandbox::Sandbox;
-    use forge_context::ContextEngine;
+    use context::{MockContextIndex, ContextIndex, SymbolKind};
+    use provider::anthropic::AnthropicProvider;
+    use sandbox::Sandbox;
+    use context::ContextEngine;
     use std::fs::{self, File};
     use std::io::Write;
     use tempfile::TempDir;

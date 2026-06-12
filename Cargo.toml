@@ -1,13 +1,14 @@
 [workspace]
 members = [
+    "agents",
+    "context",
+    "ext",
     "forge-cli",
     "forge-core",
-    "forge-provider",
-    "forge-context",
-    "forge-agents",
-    "forge-sandbox",
-    "forge-verify",
-    "forge-ext",
+    "forge-tui",
+    "provider",
+    "sandbox",
+    "verify",
 ]
 resolver = "2"
 

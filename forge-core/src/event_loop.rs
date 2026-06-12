@@ -1,7 +1,7 @@
 use anyhow::Result;
-use forge_provider::{ModelProvider, Message, ToolCall};
-use forge_context::{ContextEngine, ContextIndex};
-use forge_sandbox::Sandbox;
+use provider::{ModelProvider, Message, ToolCall};
+use context::{ContextEngine, ContextIndex};
+use sandbox::Sandbox;
 use tracing::{debug, info, warn};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -243,8 +243,8 @@ impl<P: ModelProvider> EventLoop<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_provider::anthropic::AnthropicProvider;
-    use forge_context::MockContextIndex;
+    use provider::anthropic::AnthropicProvider;
+    use context::MockContextIndex;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -305,14 +305,14 @@ mod tests {
 
         // Add a symbol to the index
         use std::path::PathBuf;
-        use forge_context::{Symbol, SymbolKind};
+        use context::SymbolKind;
         context_index.upsert_file(
             &PathBuf::from("lib.rs"),
             "fn existing_function() {}"
         );
 
         // DEBUG: Verify symbol was extracted correctly
-        use forge_context::ContextIndex;
+        use context::ContextIndex;
         let resolved = context_index.resolve_symbol("existing_function");
         assert!(resolved.is_some(), "Symbol 'existing_function' should exist after upsert_file");
         let symbol = resolved.unwrap();
@@ -328,7 +328,7 @@ mod tests {
         let new_text = "existing_function();";
 
         let result = event_loop.verify_symbols_before_edit(
-            &event_loop.context_index.as_ref().unwrap(),
+            event_loop.context_index.as_ref().unwrap(),
             old_text,
             new_text,
         ).await;
@@ -352,7 +352,7 @@ mod tests {
         let new_text = "let x = non_existent_function();";
 
         let result = event_loop.verify_symbols_before_edit(
-            &event_loop.context_index.as_ref().unwrap(),
+            event_loop.context_index.as_ref().unwrap(),
             old_text,
             new_text,
         ).await;

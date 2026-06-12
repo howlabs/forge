@@ -1,6 +1,6 @@
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event, EventKind};
-use forge_context::ContextIndex;
+use context::ContextIndex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -178,7 +178,7 @@ impl FileWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_context::MockContextIndex;
+    use context::MockContextIndex;
     use std::fs::{self, File};
     use std::io::Write;
     use tempfile::TempDir;

@@ -1,21 +1,14 @@
 [package]
-name = "forge-core"
+name = "provider"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-provider = { path = "../provider" }
-context = { path = "../context" }
-sandbox = { path = "../sandbox" }
-
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 reqwest = { workspace = true }
-notify = "6.1"
-
-[dev-dependencies]
-tempfile = "3.8"
+tracing = { workspace = true }
+async-trait = "0.1"

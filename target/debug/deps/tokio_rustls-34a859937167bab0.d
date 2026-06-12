@@ -1,9 +1,0 @@
-/home/syr/Màn hình nền/cli/target/debug/deps/tokio_rustls-34a859937167bab0.d: /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/lib.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/client.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/common/mod.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/common/handshake.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/server.rs
-
-/home/syr/Màn hình nền/cli/target/debug/deps/libtokio_rustls-34a859937167bab0.rmeta: /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/lib.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/client.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/common/mod.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/common/handshake.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/server.rs
-
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/lib.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/client.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/common/mod.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/common/handshake.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-rustls-0.24.1/src/server.rs:

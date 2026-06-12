@@ -1,0 +1,179 @@
+# -----------------------------------------------------------------------------
+# Rust / Cargo
+# -----------------------------------------------------------------------------
+
+# Crate build artifacts
+/target/
+**/*.rs.bc
+**/*.bk
+**/*.o
+**/*.a
+
+# Cargo lock file - uncomment ONLY for libraries
+# For applications, keep Cargo.lock committed
+#Cargo.lock
+
+# -----------------------------------------------------------------------------
+# IDEs & Editors
+# -----------------------------------------------------------------------------
+
+# VSCode
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# IntelliJ IDEA / RustRover
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# CLion
+cmake-build-*/
+
+# Vim / Swaps
+*.swp
+*.swo
+*~
+.*.sw[a-p]
+
+# Emacs
+*~
+\#*\#
+.\#*
+*.elc
+*.eln
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Kate
+.directory
+
+# JetBrains
+*.idea/
+
+# -----------------------------------------------------------------------------
+# macOS
+# -----------------------------------------------------------------------------
+
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# -----------------------------------------------------------------------------
+# Linux
+# -----------------------------------------------------------------------------
+
+*~
+.directory
+.Trash-*
+
+# -----------------------------------------------------------------------------
+# Windows
+# -----------------------------------------------------------------------------
+
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# -----------------------------------------------------------------------------
+# Backup & Temporary files
+# -----------------------------------------------------------------------------
+
+*.bak
+*.backup
+*.tmp
+*.temp
+*.log
+*.cache
+
+# -----------------------------------------------------------------------------
+# Testing & Coverage
+# -----------------------------------------------------------------------------
+
+# Tarpaulin coverage report
+tarpaulin-report.html
+*.xml
+
+# Cargo nextest
+.cargo/nextest/
+
+# -----------------------------------------------------------------------------
+# Debugger & Profiler
+# -----------------------------------------------------------------------------
+
+# GDB
+*.gdb-history
+
+# LLDB
+.lldb_history
+
+# Perf
+perf.data
+perf.data.old
+
+# Flamegraph
+*.flamegraph.svg
+*.flamegraph.json
+
+# -----------------------------------------------------------------------------
+# Documentation
+# -----------------------------------------------------------------------------
+
+# Keep docs/ but ignore generated docs
+/doc/book/
+/doc/
+
+# -----------------------------------------------------------------------------
+# Miscellaneous
+# -----------------------------------------------------------------------------
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Local configuration (can override .gitignore)
+.gitignore.local
+
+# Patch files
+*.patch
+*.diff
+
+# Node modules (if any JS tooling)
+node_modules/
+
+# Yarn
+yarn-error.log
+yarn.lock
+
+# -----------------------------------------------------------------------------
+# Project-specific (if needed)
+# -----------------------------------------------------------------------------
+
+# Uncomment and add project-specific ignores below
+# *.log
+# .forge/

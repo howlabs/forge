@@ -1,10 +1,23 @@
 # Forge Configuration File
 
 [provider]
-# v0.100.0: Anthropic only (will add OpenAI, Gemini, local in v0.190.0)
-type = "anthropic"
-model = "claude-sonnet-4-20250514"
-api_key_env = "FORGE_API_KEY"
+# Default provider: Z.AI with GLM 5.1
+type = "zai"
+model = "glm-5.1"
+api_key_env = "ZAI_API_KEY"
+
+# Alternative providers:
+# type = "anthropic"
+# model = "claude-sonnet-4-20250514"
+# api_key_env = "FORGE_API_KEY"
+#
+# type = "openai"
+# model = "gpt-4"
+# api_key_env = "OPENAI_API_KEY"
+#
+# type = "gemini"
+# model = "gemini-pro"
+# api_key_env = "GEMINI_API_KEY"
 
 [sandbox]
 # Network mode: off, restricted, full

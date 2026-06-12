@@ -1,9 +1,0 @@
-/home/syr/Màn hình nền/cli/target/debug/deps/tree_sitter-136aaad4187e3e4c.d: /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/lib.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/ffi.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/util.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/./bindings.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/../include/tree_sitter/parser.h
-
-/home/syr/Màn hình nền/cli/target/debug/deps/libtree_sitter-136aaad4187e3e4c.rmeta: /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/lib.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/ffi.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/util.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/./bindings.rs /home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/../include/tree_sitter/parser.h
-
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/lib.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/ffi.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/util.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/./bindings.rs:
-/home/syr/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-0.20.10/binding_rust/../include/tree_sitter/parser.h:
