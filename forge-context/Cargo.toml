@@ -8,3 +8,14 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+
+# Tree-sitter for parsing
+tree-sitter = "0.20"
+tree-sitter-rust = "0.20"
+
+# Knowledge graph
+petgraph = "0.6"
+
+# Vector store & embeddings - using simple in-memory implementation for MVP
+# Simple embedding with tokenization (we'll use a basic approach for MVP)
+fnv = "1.0"  # For hashing symbol IDs
