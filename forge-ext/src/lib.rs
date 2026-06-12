@@ -8,6 +8,7 @@
 //! - Multi-provider support
 //! - Observability
 
+pub mod hooks;
 pub mod mcp;
 
 #[cfg(test)]
