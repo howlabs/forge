@@ -1,19 +1,34 @@
-//! Multi-agent orchestration (v0.170.0)
+//! Multi-agent orchestration (v0.170.0) and Long-horizon checkpointing (v0.180.0)
 //!
-//! This crate will handle:
-//! - Agent spawning and isolation
-//! - Git worktree management per agent
-//! - Parallel agent coordination
-//! - Long-horizon checkpoint/resume
+//! This crate provides:
+//! - Shared types: Task, TaskStatus, VerifyReport, Checkpoint
+//! - Core traits: Orchestrator, Verifier, CheckpointStore
+//! - Frozen contract for parallel development tracks
 
-#[allow(unused)]
-pub struct Agents;
+pub mod types;
+pub mod traits;
+
+// Re-export core types and traits for convenience
+pub use types::{Task, TaskStatus, VerifyReport, Checkpoint};
+pub use traits::{Orchestrator, Verifier, CheckpointStore};
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_placeholder() {
-        // Placeholder test until v0.170.0
-        assert!(true);
+    fn test_shared_contract() {
+        // Verify shared contract is properly exported
+        use crate::{Task, TaskStatus, VerifyReport, Checkpoint};
+        use crate::{Orchestrator, Verifier, CheckpointStore};
+
+        // Test that types can be created
+        let task = Task::new("Test", std::path::PathBuf::from("/tmp"));
+        assert_eq!(task.status, TaskStatus::Pending);
+
+        let report = VerifyReport::success("OK", 100);
+        assert!(report.passed);
+
+        let checkpoint = Checkpoint::new("task-1", 1, vec![1, 2, 3]);
+        assert_eq!(checkpoint.step, 1);
     }
 }
+
