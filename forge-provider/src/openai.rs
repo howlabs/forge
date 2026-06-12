@@ -40,6 +40,7 @@ impl OpenAIProvider {
             model: model.into(),
             api_key: api_key.into(),
             client: Client::new(),
+            base_url: None,
         }
     }
 
