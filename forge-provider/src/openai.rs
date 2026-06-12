@@ -15,6 +15,7 @@ pub struct OpenAIProvider {
     model: String,
     api_key: String,
     client: Client,
+    base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
