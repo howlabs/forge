@@ -57,6 +57,10 @@ impl OpenAIProvider {
         }
     }
 
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
     fn convert_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         messages
             .iter()
@@ -140,5 +144,20 @@ mod tests {
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0]["role"], "system");
         assert_eq!(converted[1]["role"], "user");
+    }
+
+    #[test]
+    fn test_with_base_url() {
+        let provider = OpenAIProvider::with_base_url(
+            "glm-5.1",
+            "test-key",
+            "https://api.z.ai/api/paas/v4/chat/completions"
+        );
+
+        assert_eq!(provider.model(), "glm-5.1");
+        assert_eq!(
+            provider.base_url(),
+            Some("https://api.z.ai/api/paas/v4/chat/completions")
+        );
     }
 }
