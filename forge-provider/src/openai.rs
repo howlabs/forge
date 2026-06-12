@@ -44,6 +44,19 @@ impl OpenAIProvider {
         }
     }
 
+    pub fn with_base_url(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        base_url: impl Into<String>
+    ) -> Self {
+        Self {
+            model: model.into(),
+            api_key: api_key.into(),
+            client: Client::new(),
+            base_url: Some(base_url.into()),
+        }
+    }
+
     fn convert_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         messages
             .iter()
