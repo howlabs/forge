@@ -2,9 +2,10 @@
 //!
 //! Runs build + test verification in worktrees
 
-use crate::traits::Verifier;
-use crate::types::VerifyReport;
+use forge_agents::traits::Verifier;
+use forge_agents::types::VerifyReport;
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -67,7 +68,7 @@ impl BuildVerifier {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl Verifier for BuildVerifier {
     async fn verify(&self, workdir: &Path) -> Result<VerifyReport> {
         info!("Verifying workdir: {}", workdir.display());

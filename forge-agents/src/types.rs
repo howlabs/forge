@@ -1,6 +1,7 @@
 //! Shared types for v0.170.0 (Multi-Agent) and v0.180.0 (Long-Horizon)
 //! Frozen before parallel development split
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -89,7 +90,7 @@ impl VerifyReport {
 }
 
 /// Crash recovery state for long-horizon tasks
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// Which task this checkpoint belongs to
     pub task_id: String,

@@ -2,8 +2,9 @@
 //!
 //! File-based checkpoint storage for crash recovery
 
-use crate::traits::CheckpointStore;
-use crate::types::Checkpoint;
+use async_trait::async_trait;
+use forge_agents::traits::CheckpointStore;
+use forge_agents::types::Checkpoint;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -70,7 +71,7 @@ impl FileCheckpointStore {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl CheckpointStore for FileCheckpointStore {
     async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
         info!("Saving checkpoint for task {} at step {}", checkpoint.task_id, checkpoint.step);
