@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tracing::debug;
 use tree_sitter::{Parser, Node};
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -54,7 +55,7 @@ pub struct CodeChunk {
 }
 
 /// Context index interface - both tracks implement this
-pub trait ContextIndex {
+pub trait ContextIndex: Send + Sync {
     /// Add or update a file in the index
     fn upsert_file(&mut self, path: &Path, src: &str);
 
@@ -69,7 +70,157 @@ pub trait ContextIndex {
 }
 
 // =============================================================================
-// VECTOR STORE - Semantic search with embeddings
+// MOCK CONTEXTINDEX - Development/Test implementation (Track B: v0.150.0)
+// =============================================================================
+
+/// Mock in-memory ContextIndex for Track B development/testing
+/// Will be replaced by Track A's SemanticContextEngine after integration
+#[derive(Debug, Clone)]
+pub struct MockContextIndex {
+    /// Map file path -> source content
+    files: Arc<Mutex<HashMap<PathBuf, String>>>,
+    /// Map symbol name -> Symbol metadata
+    symbols: Arc<Mutex<HashMap<String, Symbol>>>,
+    /// Map chunk id -> CodeChunk
+    chunks: Arc<Mutex<HashMap<String, CodeChunk>>>,
+}
+
+impl MockContextIndex {
+    pub fn new() -> Self {
+        Self {
+            files: Arc::new(Mutex::new(HashMap::new())),
+            symbols: Arc::new(Mutex::new(HashMap::new())),
+            chunks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Extract simple symbols from source (very basic extraction for mock)
+    fn extract_symbols(path: &Path, src: &str) -> Vec<Symbol> {
+        let mut symbols = Vec::new();
+        let lines: Vec<&str> = src.lines().collect();
+
+        for (line_no, line) in lines.iter().enumerate() {
+            // Very basic pattern matching for common definitions
+            if line.contains("fn ") && !line.trim_start().starts_with("//") {
+                if let Some(name) = line.split("fn ").nth(1) {
+                    if let Some(name) = name.split('(').next() {
+                        let name = name.trim().to_string();
+                        if !name.is_empty() {
+                            symbols.push(Symbol {
+                                name: name.clone(), // Use simple name without file prefix
+                                kind: SymbolKind::Function,
+                                file: path.to_path_buf(),
+                                range: (line_no, 0, line_no, line.len()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            if line.contains("struct ") && !line.trim_start().starts_with("//") {
+                if let Some(name) = line.split("struct ").nth(1) {
+                    if let Some(name) = name.split('{').next() {
+                        let name = name.trim().to_string();
+                        if !name.is_empty() {
+                            symbols.push(Symbol {
+                                name: name.clone(), // Use simple name without file prefix
+                                kind: SymbolKind::Struct,
+                                file: path.to_path_buf(),
+                                range: (line_no, 0, line_no, line.len()),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        symbols
+    }
+
+    /// Create chunks from source (very basic chunking for mock)
+    fn create_chunks(path: &Path, src: &str) -> Vec<CodeChunk> {
+        vec![CodeChunk {
+            file: path.to_path_buf(),
+            range: (0, 0, src.lines().count(), 0),
+            text: src.to_string(),
+            symbol_ids: Vec::new(),
+        }]
+    }
+}
+
+impl Default for MockContextIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextIndex for MockContextIndex {
+    fn upsert_file(&mut self, path: &Path, src: &str) {
+        debug!("MockContextIndex: upsert_file {}", path.display());
+
+        // Remove old data for this file
+        self.remove_file(path);
+
+        // Store new content
+        let mut files = self.files.lock().unwrap();
+        files.insert(path.to_path_buf(), src.to_string());
+        drop(files);
+
+        // Extract and store symbols
+        let symbols = Self::extract_symbols(path, src);
+        let mut symbols_map = self.symbols.lock().unwrap();
+        for symbol in symbols {
+            debug!("  Extracted symbol: {}", symbol.name);
+            symbols_map.insert(symbol.name.clone(), symbol);
+        }
+        drop(symbols_map);
+
+        // Create and store chunks
+        let chunks = Self::create_chunks(path, src);
+        let mut chunks_map = self.chunks.lock().unwrap();
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let chunk_id = format!("{}:{}", path.display(), i);
+            chunks_map.insert(chunk_id, chunk);
+        }
+    }
+
+    fn remove_file(&mut self, path: &Path) {
+        debug!("MockContextIndex: remove_file {}", path.display());
+
+        // Remove file content
+        let mut files = self.files.lock().unwrap();
+        files.remove(path);
+        drop(files);
+
+        // Remove symbols from this file
+        let mut symbols_map = self.symbols.lock().unwrap();
+        symbols_map.retain(|_, symbol| symbol.file != path);
+        drop(symbols_map);
+
+        // Remove chunks from this file
+        let mut chunks_map = self.chunks.lock().unwrap();
+        chunks_map.retain(|_, chunk| chunk.file != path);
+    }
+
+    fn query(&self, q: &str, k: usize) -> Vec<CodeChunk> {
+        debug!("MockContextIndex: query '{}', k={}", q, k);
+
+        // Very basic query: return all chunks (no semantic search in mock)
+        let chunks = self.chunks.lock().unwrap();
+        let values: Vec<CodeChunk> = chunks.values().cloned().collect();
+        values.into_iter().take(k).collect()
+    }
+
+    fn resolve_symbol(&self, name: &str) -> Option<Symbol> {
+        debug!("MockContextIndex: resolve_symbol '{}'", name);
+
+        let symbols = self.symbols.lock().unwrap();
+        symbols.get(name).cloned()
+    }
+}
+
+// =============================================================================
+// VECTOR STORE - Semantic search with embeddings (Track A: v0.100.0)
 // =============================================================================
 
 /// Simple vector store for semantic code search
@@ -1122,5 +1273,73 @@ mod tests {
         // Query should now only return results from utils.rs
         let results_after = engine.query("parse", 5);
         assert!(results_after.iter().all(|r| r.file == utils_path));
+    }
+
+    // ==================== MOCK CONTEXTINDEX TESTS (Track B) ====================
+
+    #[test]
+    fn test_mock_context_index_upsert() {
+        let mut index = MockContextIndex::new();
+
+        let path = PathBuf::from("test.rs");
+        let src = r#"
+fn test_function() -> usize {
+    42
+}
+
+struct TestStruct {
+    value: usize,
+}
+"#;
+
+        index.upsert_file(&path, src);
+
+        // Check that file was stored
+        let files = index.files.lock().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files.get(&path).unwrap(), src);
+    }
+
+    #[test]
+    fn test_mock_context_index_remove() {
+        let mut index = MockContextIndex::new();
+
+        let path = PathBuf::from("test.rs");
+        index.upsert_file(&path, "fn test() {}");
+
+        index.remove_file(&path);
+
+        // Check that file was removed
+        let files = index.files.lock().unwrap();
+        assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    fn test_mock_context_index_resolve() {
+        let mut index = MockContextIndex::new();
+
+        let path = PathBuf::from("test.rs");
+        let src = "fn test_function() {}";
+        index.upsert_file(&path, src);
+
+        // Try to resolve the function (note: simple name without file prefix)
+        let symbol = index.resolve_symbol("test_function");
+
+        assert!(symbol.is_some());
+        let symbol = symbol.unwrap();
+        assert_eq!(symbol.kind, SymbolKind::Function);
+        assert_eq!(symbol.file, path);
+    }
+
+    #[test]
+    fn test_mock_context_index_query() {
+        let mut index = MockContextIndex::new();
+
+        let path = PathBuf::from("test.rs");
+        index.upsert_file(&path, "fn test() {}");
+
+        let results = index.query("test", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file, path);
     }
 }
