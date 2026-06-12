@@ -1,0 +1,369 @@
+warning: type `SymbolEdge` is more private than the item `KnowledgeGraph::add_relationship`
+   --> forge-context/src/lib.rs:511:5
+    |
+511 |     pub fn add_relationship(&mut self, from: &str, to: &str, edge: SymbolEdge) -> Result<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `KnowledgeGraph::add_relationship` is reachable at visibility `pub`
+    |
+note: but type `SymbolEdge` is only usable at visibility `pub(crate)`
+   --> forge-context/src/lib.rs:479:1
+    |
+479 | enum SymbolEdge {
+    | ^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: variants `Defines`, `References`, `Calls`, `Implements`, and `Uses` are never constructed
+   --> forge-context/src/lib.rs:480:5
+    |
+479 | enum SymbolEdge {
+    |      ---------- variants in this enum
+480 |     Defines,
+    |     ^^^^^^^
+481 |     References,
+    |     ^^^^^^^^^^
+482 |     Calls,
+    |     ^^^^^
+483 |     Implements,
+    |     ^^^^^^^^^^
+484 |     Uses,
+    |     ^^^^
+    |
+    = note: `SymbolEdge` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of `or_insert_with` to construct default value
+   --> forge-context/src/lib.rs:265:18
+    |
+265 |                 .or_insert_with(HashSet::new)
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `or_default()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_or_default
+    = note: `#[warn(clippy::unwrap_or_default)]` on by default
+
+warning: needlessly taken reference of left operand
+   --> forge-context/src/lib.rs:586:25
+    |
+586 |             .filter(|s| &s.file == path)
+    |                         -------^^^^^^^^
+    |                         |
+    |                         help: use the left value directly: `s.file`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#op_ref
+    = note: `#[warn(clippy::op_ref)]` on by default
+
+warning: needlessly taken reference of left operand
+   --> forge-context/src/lib.rs:594:30
+    |
+594 |             .filter(|(_, s)| &s.file == path)
+    |                              -------^^^^^^^^
+    |                              |
+    |                              help: use the left value directly: `s.file`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#op_ref
+
+warning: unused import: `Path`
+ --> forge-agents/src/orchestrator.rs:9:17
+  |
+9 | use std::path::{Path, PathBuf};
+  |                 ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SystemTime`
+  --> forge-agents/src/orchestrator.rs:11:27
+   |
+11 | use std::time::{Duration, SystemTime};
+   |                           ^^^^^^^^^^
+
+warning: unused import: `Mutex`
+  --> forge-agents/src/orchestrator.rs:12:19
+   |
+12 | use tokio::sync::{Mutex, RwLock};
+   |                   ^^^^^
+
+warning: `forge-context` (lib) generated 5 warnings (run `cargo clippy --fix --lib -p forge-context -- ` to apply 3 suggestions)
+warning: `forge-agents` (lib) generated 3 warnings (run `cargo clippy --fix --lib -p forge-agents -- ` to apply 3 suggestions)
+warning: unused import: `Context`
+ --> forge-verify/src/verifier.rs:7:14
+  |
+7 | use anyhow::{Context, Result};
+  |              ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Path`
+  --> forge-verify/src/checkpoint_store.rs:11:17
+   |
+11 | use std::path::{Path, PathBuf};
+   |                 ^^^^
+
+warning: unused import: `warn`
+  --> forge-verify/src/checkpoint_store.rs:14:28
+   |
+14 | use tracing::{debug, info, warn};
+   |                            ^^^^
+
+warning: field `timeout_seconds` is never read
+  --> forge-verify/src/verifier.rs:17:5
+   |
+15 | pub struct BuildVerifier {
+   |            ------------- field in this struct
+16 |     /// Timeout in seconds
+17 |     timeout_seconds: u64,
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `CheckpointStore`, `Orchestrator`, and `Verifier`
+  --> forge-agents/src/lib.rs:22:21
+   |
+22 |         use crate::{Orchestrator, Verifier, CheckpointStore};
+   |                     ^^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: this assertion is always `true`
+   --> forge-agents/src/orchestrator.rs:241:9
+    |
+241 |         assert!(true);
+    |         ^^^^^^^^^^^^^
+    |
+    = help: remove the assertion
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#assertions_on_constants
+    = note: `#[warn(clippy::assertions_on_constants)]` on by default
+
+warning: `forge-verify` (lib) generated 4 warnings (run `cargo clippy --fix --lib -p forge-verify -- ` to apply 3 suggestions)
+warning: `forge-verify` (lib test) generated 3 warnings (3 duplicates)
+warning: `forge-agents` (lib test) generated 5 warnings (3 duplicates) (run `cargo clippy --fix --lib -p forge-agents --tests -- ` to apply 1 suggestion)
+warning: variants `Defines`, `References`, `Implements`, and `Uses` are never constructed
+   --> forge-context/src/lib.rs:480:5
+    |
+479 | enum SymbolEdge {
+    |      ---------- variants in this enum
+480 |     Defines,
+    |     ^^^^^^^
+481 |     References,
+    |     ^^^^^^^^^^
+482 |     Calls,
+483 |     Implements,
+    |     ^^^^^^^^^^
+484 |     Uses,
+    |     ^^^^
+    |
+    = note: `SymbolEdge` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: length comparison to one
+    --> forge-context/src/lib.rs:1172:17
+     |
+1172 |         assert!(symbols.len() >= 1);
+     |                 ^^^^^^^^^^^^^^^^^^ help: using `!is_empty` is clearer and more explicit: `!symbols.is_empty()`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#len_zero
+     = note: `#[warn(clippy::len_zero)]` on by default
+
+warning: `forge-context` (lib test) generated 6 warnings (4 duplicates) (run `cargo clippy --fix --lib -p forge-context --tests -- ` to apply 1 suggestion)
+warning: use of `or_insert_with` to construct default value
+  --> forge-ext/src/hooks/registry.rs:27:14
+   |
+27 |             .or_insert_with(Vec::new)
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `or_default()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_or_default
+   = note: `#[warn(clippy::unwrap_or_default)]` on by default
+
+warning: this assertion is always `true`
+   --> forge-ext/src/mcp/client.rs:114:9
+    |
+114 |         assert!(true);
+    |         ^^^^^^^^^^^^^
+    |
+    = help: remove the assertion
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#assertions_on_constants
+    = note: `#[warn(clippy::assertions_on_constants)]` on by default
+
+warning: you should consider adding a `Default` implementation for `McpServer`
+  --> forge-ext/src/mcp/server.rs:17:5
+   |
+17 | /     pub fn new() -> Self {
+18 | |         Self {
+19 | |             tools: HashMap::new(),
+20 | |         }
+21 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#new_without_default
+   = note: `#[warn(clippy::new_without_default)]` on by default
+help: try adding this
+   |
+15 + impl Default for McpServer {
+16 +     fn default() -> Self {
+17 +         Self::new()
+18 +     }
+19 + }
+   |
+
+warning: this assertion is always `true`
+  --> forge-ext/src/mcp/server_process.rs:77:9
+   |
+77 |         assert!(true);
+   |         ^^^^^^^^^^^^^
+   |
+   = help: remove the assertion
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#assertions_on_constants
+
+warning: this assertion is always `true`
+  --> forge-ext/src/mcp/transport.rs:52:9
+   |
+52 |         assert!(true);
+   |         ^^^^^^^^^^^^^
+   |
+   = help: remove the assertion
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#assertions_on_constants
+
+warning: use of `or_insert_with` to construct default value
+  --> forge-ext/src/observability/metrics.rs:30:14
+   |
+30 |             .or_insert_with(TokenUsage::default);
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `or_default()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_or_default
+
+warning: useless use of `format!`
+  --> forge-ext/src/observability/trace_log.rs:36:24
+   |
+36 |             timestamp: format!("{}", chrono::Utc::now().to_rfc3339()),
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: consider using `.to_string()`: `chrono::Utc::now().to_rfc3339().to_string()`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#useless_format
+   = note: `#[warn(clippy::useless_format)]` on by default
+
+warning: this assertion is always `true`
+  --> forge-ext/src/lib.rs:21:9
+   |
+21 |         assert!(true);
+   |         ^^^^^^^^^^^^^
+   |
+   = help: remove the assertion
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#assertions_on_constants
+
+warning: `forge-ext` (lib test) generated 8 warnings (run `cargo clippy --fix --lib -p forge-ext --tests -- ` to apply 3 suggestions)
+warning: `forge-ext` (lib) generated 4 warnings (4 duplicates)
+warning: variable does not need to be mutable
+  --> forge-provider/src/anthropic.rs:90:13
+   |
+90 |         let mut request_builder = self
+   |             ----^^^^^^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `id` is never read
+  --> forge-provider/src/anthropic.rs:23:5
+   |
+21 | struct AnthropicResponse {
+   |        ----------------- field in this struct
+22 |     content: Vec<AnthropicContent>,
+23 |     id: String,
+   |     ^^
+   |
+   = note: `AnthropicResponse` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> forge-provider/src/anthropic.rs:60:35
+   |
+60 |     fn convert_messages(messages: &[Message]) -> (Vec<AnthropicMessage>, Option<String>) {
+   |                                   ^^^^^^^^^^          ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                                   |
+   |                                   the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+60 |     fn convert_messages(messages: &[Message]) -> (Vec<AnthropicMessage<'_>>, Option<String>) {
+   |                                                                       ++++
+
+warning: `forge-provider` (lib) generated 3 warnings (run `cargo clippy --fix --lib -p forge-provider -- ` to apply 2 suggestions)
+warning: `forge-provider` (lib test) generated 3 warnings (3 duplicates)
+warning: unused import: `Symbol`
+   --> forge-core/src/event_loop.rs:308:29
+    |
+308 |         use forge_context::{Symbol, SymbolKind};
+    |                             ^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> forge-core/src/event_loop.rs:331:13
+    |
+331 |             &event_loop.context_index.as_ref().unwrap(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `event_loop.context_index.as_ref().unwrap()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#needless_borrow
+    = note: `#[warn(clippy::needless_borrow)]` on by default
+
+warning: this expression creates a reference which is immediately dereferenced by the compiler
+   --> forge-core/src/event_loop.rs:355:13
+    |
+355 |             &event_loop.context_index.as_ref().unwrap(),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: change this to: `event_loop.context_index.as_ref().unwrap()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#needless_borrow
+
+warning: `forge-core` (lib test) generated 3 warnings (run `cargo clippy --fix --lib -p forge-core --tests -- ` to apply 3 suggestions)
+warning: unused import: `ExecResult`
+  --> forge-cli/src/main.rs:14:34
+   |
+14 | use exec::{run_exec, ExecConfig, ExecResult};
+   |                                  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `CheckpointStore` and `Checkpoint`
+   --> forge-cli/src/main.rs:243:24
+    |
+243 |     use forge_agents::{CheckpointStore, Checkpoint};
+    |                        ^^^^^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: fields `task`, `output_format`, and `trace` are never read
+  --> forge-cli/src/exec.rs:11:9
+   |
+10 | pub struct ExecConfig {
+   |            ---------- fields in this struct
+11 |     pub task: String,
+   |         ^^^^
+12 |     pub verify: bool,
+13 |     pub output_format: String, // "json" | "text"
+   |         ^^^^^^^^^^^^^
+14 |     pub trace: bool,
+   |         ^^^^^
+   |
+   = note: `ExecConfig` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: name `ZAI` contains a capitalized acronym
+  --> forge-cli/src/main.rs:21:5
+   |
+21 |     ZAI,
+   |     ^^^ help: consider making the acronym lowercase, except the initial letter: `Zai`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#upper_case_acronyms
+   = note: `#[warn(clippy::upper_case_acronyms)]` on by default
+
+warning: fields `output_format` and `trace` are never read
+  --> forge-cli/src/exec.rs:13:9
+   |
+10 | pub struct ExecConfig {
+   |            ---------- fields in this struct
+...
+13 |     pub output_format: String, // "json" | "text"
+   |         ^^^^^^^^^^^^^
+14 |     pub trace: bool,
+   |         ^^^^^
+   |
+   = note: `ExecConfig` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `forge-cli` (bin "forge") generated 4 warnings (run `cargo clippy --fix --bin "forge" -p forge-cli -- ` to apply 2 suggestions)
+warning: `forge-cli` (bin "forge" test) generated 4 warnings (3 duplicates)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s

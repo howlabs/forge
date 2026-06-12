@@ -1,5 +1,5 @@
 [package]
-name = "forge-verify"
+name = "verify"
 version.workspace = true
 edition.workspace = true
 
@@ -8,6 +8,6 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-forge-agents = { path = "../forge-agents" }
+agents = { path = "../agents" }
 serde_json = "1.0"
 async-trait = "0.1"

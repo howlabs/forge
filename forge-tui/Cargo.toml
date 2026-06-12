@@ -1,0 +1,42 @@
+[package]
+name = "forge-tui"
+version = "0.98.0"
+edition = "2021"
+authors = ["Forge Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# TUI framework
+ratatui = "0.27"
+crossterm = "0.27"
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Forge dependencies (public traits only)
+agents = { path = "../agents" }
+forge-core = { path = "../forge-core" }
+provider = { path = "../provider" }
+context = { path = "../context" }
+sandbox = { path = "../sandbox" }
+
+# Text processing
+textwrap = "0.16"
+unicode-width = "0.1"
+
+# Testing
+mockito = { workspace = true }
+tempfile = { workspace = true }

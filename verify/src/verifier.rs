@@ -2,9 +2,9 @@
 //!
 //! Runs build + test verification in worktrees
 
-use forge_agents::traits::Verifier;
-use forge_agents::types::VerifyReport;
-use anyhow::{Context, Result};
+use agents::traits::Verifier;
+use agents::types::VerifyReport;
+use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
 use std::process::Command;
@@ -12,15 +12,18 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Build and test verifier
-pub struct BuildVerifier {
-    /// Timeout in seconds
-    timeout_seconds: u64,
+pub struct BuildVerifier;
+
+impl Default for BuildVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BuildVerifier {
     /// Create a new verifier
-    pub fn new(timeout_seconds: u64) -> Self {
-        Self { timeout_seconds }
+    pub fn new() -> Self {
+        Self
     }
 
     /// Run cargo build
@@ -132,13 +135,14 @@ mod tests {
 
     #[test]
     fn test_verifier_creation() {
-        let verifier = BuildVerifier::new(300);
-        assert_eq!(verifier.timeout_seconds, 300);
+        let _verifier = BuildVerifier::new();
+        // Test that verifier can be created
+        // Placeholder assertion - verifier creation is success if we reach here
     }
 
     #[tokio::test]
     async fn test_quick_check_missing_cargo_toml() {
-        let verifier = BuildVerifier::new(300);
+        let verifier = BuildVerifier::new();
         let result = verifier.quick_check(Path::new("/tmp/nonexistent")).await;
         assert!(result.is_ok());
         assert!(!result.unwrap());

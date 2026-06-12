@@ -3,15 +3,15 @@
 //! File-based checkpoint storage for crash recovery
 
 use async_trait::async_trait;
-use forge_agents::traits::CheckpointStore;
-use forge_agents::types::Checkpoint;
+use agents::traits::CheckpointStore;
+use agents::types::Checkpoint;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// File-based checkpoint storage
 #[derive(Clone)]

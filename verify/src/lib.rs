@@ -15,8 +15,8 @@ pub use verifier::BuildVerifier;
 pub use checkpoint_store::FileCheckpointStore;
 
 // Re-export shared types and traits from forge-agents
-pub use forge_agents::{Task, TaskStatus, VerifyReport, Checkpoint};
-pub use forge_agents::{Orchestrator, Verifier, CheckpointStore};
+pub use agents::{Task, TaskStatus, VerifyReport, Checkpoint};
+pub use agents::{Orchestrator, Verifier, CheckpointStore};
 
 // Legacy verification loop (kept for compatibility)
 /// Verify loop: run tests and build before reporting done
