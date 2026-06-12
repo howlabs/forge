@@ -1,0 +1,12 @@
+[package]
+name = "forge-ext"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# TODO: v0.190.0 - Add MCP, hooks, skills dependencies

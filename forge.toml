@@ -1,0 +1,26 @@
+# Forge Configuration File
+
+[provider]
+# v0.100.0: Anthropic only (will add OpenAI, Gemini, local in v0.190.0)
+type = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "FORGE_API_KEY"
+
+[sandbox]
+# Network mode: off, restricted, full
+network = "off"
+# Working directory
+project_path = "."
+
+[context]
+# v0.100.0: AGENTS.md only (will add tree-sitter + vector store in v0.130.0)
+agents_file = "AGENTS.md"
+
+[verify]
+# Mandatory verify loop - always run before reporting done
+enabled = true
+# Run cargo test and cargo build
+commands = ["cargo test", "cargo build"]
+
+[logging]
+level = "info"

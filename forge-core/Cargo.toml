@@ -1,0 +1,17 @@
+[package]
+name = "forge-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+forge-provider = { path = "../forge-provider" }
+forge-context = { path = "../forge-context" }
+forge-sandbox = { path = "../forge-sandbox" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
