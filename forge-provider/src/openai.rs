@@ -80,9 +80,12 @@ impl ModelProvider for OpenAIProvider {
     async fn chat(&self, messages: &[Message]) -> Result<ChatResponse> {
         let openai_messages = Self::convert_messages(messages);
 
+        let url = self.base_url.as_deref()
+            .unwrap_or("https://api.openai.com/v1/chat/completions");
+
         let response = self
             .client
-            .post("https://api.openai.com/v1/chat/completions")
+            .post(url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&json!({
