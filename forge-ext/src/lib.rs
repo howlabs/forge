@@ -10,6 +10,7 @@
 
 pub mod hooks;
 pub mod mcp;
+pub mod observability;
 pub mod skills;
 
 #[cfg(test)]

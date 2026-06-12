@@ -1,3 +1,7 @@
+//! Forge Context Engine
+//!
+//! Provides semantic context indexing and retrieval for code understanding.
+
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
@@ -7,6 +11,8 @@ use tree_sitter::{Parser, Node};
 use petgraph::graph::{DiGraph, NodeIndex};
 use fnv::FnvHasher;
 use std::hash::{Hash, Hasher};
+
+pub mod agents;
 
 // =============================================================================
 // SHARED CONTRACT - Frozen before splitting into parallel tracks
@@ -818,15 +824,19 @@ impl SemanticContextEngine {
         }
     }
 
-    /// Load AGENTS.md for system prompt (legacy compatibility)
+    /// Load AGENTS.md for system prompt
     pub fn load_agents_md(&self, project_path: &Path) -> Result<String> {
         let agents_path = project_path.join("AGENTS.md");
         debug!("Loading AGENTS.md from: {}", agents_path.display());
 
+        // Treat AGENTS.md as optional - return Ok even if missing
         std::fs::read_to_string(&agents_path)
             .map_err(|e| anyhow::anyhow!("Failed to load AGENTS.md: {}", e))
     }
 }
+
+// Re-export AGENTS.md discovery types
+pub use agents::{AgentsDiscovery, AgentsFile};
 
 impl Default for SemanticContextEngine {
     fn default() -> Self {
