@@ -336,6 +336,10 @@ name = "forge-ext"
 version = "0.98.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

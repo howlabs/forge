@@ -8,8 +8,7 @@
 //! - Multi-provider support
 //! - Observability
 
-#[allow(unused)]
-pub struct Extensions;
+pub mod mcp;
 
 #[cfg(test)]
 mod tests {
@@ -19,3 +18,4 @@ mod tests {
         assert!(true);
     }
 }
+
