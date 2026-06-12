@@ -17,6 +17,18 @@ Forge is a single static Rust binary that is lighter than Codex, model-agnostic 
 7. **Long-horizon** - Checkpoint + resume
 8. **Open extensibility** - MCP client/server, hooks, skills, optional AGENTS.md
 
+## Supported Providers
+
+Forge CLI supports multiple AI model providers:
+
+- **OpenAI** - GPT-4, GPT-3.5 (default)
+- **Anthropic** - Claude models
+- **Gemini** - Google Gemini models
+- **Local** - Local models (Ollama/llama.cpp)
+- **Z.AI** - GLM models (glm-5.1, glm-4.7, glm-4.5, glm-4.5-air)
+
+See [docs/providers/](docs/providers/) for detailed documentation.
+
 ## Architecture
 
 ```
