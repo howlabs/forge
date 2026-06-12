@@ -7,6 +7,7 @@
 
 pub mod types;
 pub mod traits;
+pub mod orchestrator;
 
 // Re-export core types and traits for convenience
 pub use types::{Task, TaskStatus, VerifyReport, Checkpoint};
