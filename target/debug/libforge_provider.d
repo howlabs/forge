@@ -1,0 +1,1 @@
+/home/syr/Màn\ hình\ nền/cli/target/debug/libforge_provider.rlib: /home/syr/Màn\ hình\ nền/cli/forge-provider/src/anthropic.rs /home/syr/Màn\ hình\ nền/cli/forge-provider/src/lib.rs /home/syr/Màn\ hình\ nền/cli/forge-provider/src/traits.rs /home/syr/Màn\ hình\ nền/cli/forge-provider/src/types.rs
