@@ -1,8 +1,20 @@
+//! Verification and checkpointing (v0.180.0)
+//!
+//! Build + test verification and crash-safe checkpoint storage
+
 use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Command;
 use tracing::{debug, info};
 
+pub mod verifier;
+pub mod checkpoint_store;
+
+// Re-export shared types and traits from forge-agents
+pub use forge_agents::{Task, TaskStatus, VerifyReport, Checkpoint};
+pub use forge_agents::{Orchestrator, Verifier, CheckpointStore};
+
+// Legacy verification loop (kept for compatibility)
 /// Verify loop: run tests and build before reporting done
 pub struct VerifyLoop {
     project_path: PathBuf,
