@@ -10,6 +10,10 @@ use tracing::{debug, info};
 pub mod verifier;
 pub mod checkpoint_store;
 
+// Re-export implementations
+pub use verifier::BuildVerifier;
+pub use checkpoint_store::FileCheckpointStore;
+
 // Re-export shared types and traits from forge-agents
 pub use forge_agents::{Task, TaskStatus, VerifyReport, Checkpoint};
 pub use forge_agents::{Orchestrator, Verifier, CheckpointStore};

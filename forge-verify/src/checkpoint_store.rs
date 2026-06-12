@@ -9,15 +9,17 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// File-based checkpoint storage
+#[derive(Clone)]
 pub struct FileCheckpointStore {
     /// Directory where checkpoints are stored
     store_path: PathBuf,
     /// In-memory cache of checkpoints
-    cache: RwLock<HashMap<String, Checkpoint>>,
+    cache: Arc<RwLock<HashMap<String, Checkpoint>>>,
 }
 
 impl FileCheckpointStore {
@@ -29,8 +31,26 @@ impl FileCheckpointStore {
 
         Ok(Self {
             store_path,
-            cache: RwLock::new(HashMap::new()),
+            cache: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Synchronous wrapper for load (for CLI usage)
+    pub fn load_sync(&self, task_id: &str) -> Result<Option<Checkpoint>> {
+        // Direct file read without async overhead
+        let path = self.checkpoint_path(task_id);
+
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let data = fs::read(&path)
+            .context("Failed to read checkpoint file")?;
+
+        let checkpoint: Checkpoint = serde_json::from_slice(&data)
+            .context("Failed to deserialize checkpoint")?;
+
+        Ok(Some(checkpoint))
     }
 
     /// Get checkpoint file path for a task

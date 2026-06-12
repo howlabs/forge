@@ -9,6 +9,7 @@ forge-provider = { path = "../forge-provider" }
 forge-context = { path = "../forge-context" }
 forge-sandbox = { path = "../forge-sandbox" }
 forge-verify = { path = "../forge-verify" }
+forge-agents = { path = "../forge-agents" }
 
 clap = { workspace = true }
 anyhow = { workspace = true }

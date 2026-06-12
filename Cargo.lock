@@ -286,6 +286,7 @@ version = "0.98.0"
 dependencies = [
  "anyhow",
  "clap",
+ "forge-agents",
  "forge-context",
  "forge-core",
  "forge-provider",

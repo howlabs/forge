@@ -29,6 +29,10 @@ struct Args {
     /// Network access mode (off, restricted, full)
     #[arg(long, default_value = "off")]
     network: String,
+
+    /// Resume a task from checkpoint (v0.180.0)
+    #[arg(long, value_name = "TASK_ID")]
+    resume: Option<String>,
 }
 
 #[tokio::main]
@@ -40,6 +44,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     tracing::info!("Forge v{} starting", env!("CARGO_PKG_VERSION"));
+
+    // Handle resume command (v0.180.0)
+    if let Some(task_id) = args.resume {
+        return resume_task(&task_id, &args.project_path);
+    }
 
     // Initialize provider (v0.100.0: Anthropic only)
     let provider = AnthropicProvider::new(args.api_key, args.model)?;
@@ -55,4 +64,43 @@ async fn main() -> Result<()> {
     event_loop.run().await?;
 
     Ok(())
+}
+
+/// Resume a task from checkpoint (v0.180.0)
+fn resume_task(task_id: &str, project_path: &str) -> Result<()> {
+    use forge_agents::{CheckpointStore, Checkpoint};
+    use forge_verify::FileCheckpointStore;
+    use std::path::PathBuf;
+
+    tracing::info!("Resuming task {} from checkpoint", task_id);
+
+    let store_path = PathBuf::from(project_path).join(".forge/checkpoints");
+    let store = FileCheckpointStore::new(store_path)?;
+
+    // Load checkpoint using sync wrapper
+    let checkpoint = store.load_sync(task_id)?;
+
+    match checkpoint {
+        Some(checkpoint) => {
+            tracing::info!(
+                "Found checkpoint for task {} at step {}",
+                task_id,
+                checkpoint.step
+            );
+            tracing::info!("State size: {} bytes", checkpoint.state.len());
+            tracing::info!("Timestamp: {:?}", checkpoint.timestamp);
+
+            // TODO: Restore state and continue execution
+            // For v0.180.0 MVP, just display checkpoint info
+            println!("Task {} resumed from step {}", task_id, checkpoint.step);
+            println!("State size: {} bytes", checkpoint.state.len());
+            println!("To continue: Implement state restoration and execution");
+
+            Ok(())
+        }
+        None => {
+            tracing::error!("No checkpoint found for task {}", task_id);
+            anyhow::bail!("No checkpoint found for task {}", task_id)
+        }
+    }
 }
