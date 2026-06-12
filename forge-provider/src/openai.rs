@@ -163,4 +163,28 @@ mod tests {
             Some("https://api.z.ai/api/paas/v4/chat/completions")
         );
     }
+
+    // Integration test with real Z.AI API
+    // Run with: cargo test --package forge-provider test_zai_real_api -- --ignored
+    // Requires: ZAI_API_KEY environment variable
+    #[tokio::test]
+    #[ignore]
+    async fn test_zai_real_api() {
+        let api_key = std::env::var("ZAI_API_KEY")
+            .expect("Set ZAI_API_KEY environment variable to run this test");
+
+        let provider = OpenAIProvider::with_base_url(
+            "glm-4.5-air",  // Cheaper model for testing
+            api_key,
+            "https://api.z.ai/api/paas/v4/chat/completions"
+        );
+
+        let messages = vec![Message::user("Say hello in one sentence")];
+        let response = provider.chat(&messages).await;
+
+        assert!(response.is_ok());
+        let response = response.unwrap();
+        assert!(!response.content.is_empty());
+        println!("Z.AI Response: {}", response.content);
+    }
 }
