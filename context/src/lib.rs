@@ -920,7 +920,7 @@ impl SemanticContextEngine {
                     name: name.to_string(),
                     kind: symbol_kind,
                     file: path.to_path_buf(),
-                    range: (start.row, start.column, end.row, end.column),
+                    range: (start.row + 1, start.column, end.row + 1, end.column),
                 });
             }
         }
@@ -947,8 +947,13 @@ impl SemanticContextEngine {
             .iter()
             .map(|symbol| {
                 let (start_line, _, end_line, _) = symbol.range;
-                let end = (end_line + 1).min(lines.len());
-                let text = lines[start_line..end].join("\n");
+                let start_idx = start_line.saturating_sub(1);
+                let end = end_line.min(lines.len());
+                let text = if start_idx < end {
+                    lines[start_idx..end].join("\n")
+                } else {
+                    String::new()
+                };
                 CodeChunk {
                     file: path.to_path_buf(),
                     range: symbol.range,

@@ -47,6 +47,9 @@ Arguments: { "command": "<shell command>" }
 When you have completed the task and verified it works, respond with a plain text summary (no tool calls).
 "#;
 
+/// Default maximum steps to prevent infinite loops
+const DEFAULT_MAX_STEPS: usize = 200;
+
 /// Core event loop: observe -> think -> act
 pub struct EventLoop<P: ModelProvider> {
     provider: P,
@@ -56,6 +59,7 @@ pub struct EventLoop<P: ModelProvider> {
     task: String,
     history: Vec<Message>,
     steps: usize,
+    max_steps: usize,
     /// ContextIndex for symbol verification (v0.150.0)
     context_index: Option<Arc<Mutex<dyn ContextIndex>>>,
     mcp_client: Option<Arc<Mutex<McpClient>>>,
@@ -72,6 +76,7 @@ impl<P: ModelProvider> EventLoop<P> {
             task,
             history: Vec::new(),
             steps: 0,
+            max_steps: DEFAULT_MAX_STEPS,
             context_index: None,
             mcp_client: None,
             mcp_tools: Vec::new(),
@@ -103,6 +108,15 @@ impl<P: ModelProvider> EventLoop<P> {
         }
 
         while self.running {
+            if self.steps >= self.max_steps {
+                warn!(
+                    "Event loop hit step limit ({}), stopping to prevent infinite loop",
+                    self.max_steps
+                );
+                self.running = false;
+                break;
+            }
+
             let response = self.provider.chat(&self.history).await?;
             self.history
                 .push(Message::assistant(response.content.clone()));
