@@ -1,7 +1,7 @@
 //! Core traits for v0.170.0 (Multi-Agent) and v0.180.0 (Long-Horizon)
 //! Frozen before parallel development split
 
-use crate::types::{Task, TaskStatus, VerifyReport, Checkpoint};
+use crate::types::{Checkpoint, Task, TaskStatus, VerifyReport};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
@@ -75,7 +75,10 @@ mod tests {
         }
 
         fn get_task_status(&self, task_id: &str) -> Option<TaskStatus> {
-            self.tasks.iter().find(|t| t.id == task_id).map(|t| t.status)
+            self.tasks
+                .iter()
+                .find(|t| t.id == task_id)
+                .map(|t| t.status)
         }
 
         async fn cancel_task(&mut self, task_id: &str) -> Result<()> {

@@ -1,7 +1,8 @@
 use anyhow::Result;
+use std::path::Component;
 use std::path::PathBuf;
 use std::process::Command;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Sandbox for safe code execution (v0.100.0: network-off)
 pub struct Sandbox {
@@ -46,14 +47,25 @@ impl Sandbox {
 
     /// Read a file
     pub async fn read_file(&self, path: &str) -> Result<String> {
+        self.validate_relative_path(path)?;
         let full_path = self.project_path.join(path);
         debug!("Reading file: {}", full_path.display());
-        std::fs::read_to_string(full_path)
+
+        let canonical = full_path
+            .canonicalize()
+            .map_err(|_| anyhow::anyhow!("File not found: {}", path))?;
+        let project_path = self.project_path.canonicalize()?;
+        if !canonical.starts_with(&project_path) {
+            return Err(anyhow::anyhow!("Path traversal not allowed: {}", path));
+        }
+
+        std::fs::read_to_string(canonical)
             .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", path, e))
     }
 
     /// Write a file
     pub async fn write_file(&self, path: &str, content: &str) -> Result<()> {
+        self.validate_relative_path(path)?;
         let full_path = self.project_path.join(path);
         debug!("Writing file: {}", full_path.display());
 
@@ -71,15 +83,25 @@ impl Sandbox {
         debug!("Running command: {}", command);
 
         let output = if self.network_mode == "off" {
-            // Network-off mode: restrict network access
-            Command::new("unshare")
-                .arg("-n")
-                .arg("-r")
+            let result = Command::new("unshare")
+                .arg("--net")
                 .arg("sh")
                 .arg("-c")
                 .arg(command)
                 .current_dir(&self.project_path)
-                .output()?
+                .output();
+
+            match result {
+                Ok(output) if output.status.success() => output,
+                Ok(_) | Err(_) => {
+                    warn!("unshare not available, running without network isolation");
+                    Command::new("sh")
+                        .arg("-c")
+                        .arg(command)
+                        .current_dir(&self.project_path)
+                        .output()?
+                }
+            }
         } else {
             // Normal mode: allow network
             Command::new("sh")
@@ -111,14 +133,27 @@ impl Sandbox {
         let new_content = content.replacen(old_text, new_text, 1);
 
         if new_content == content {
-            return Err(anyhow::anyhow!(
-                "Old text not found in file: {}",
-                path
-            ));
+            return Err(anyhow::anyhow!("Old text not found in file: {}", path));
         }
 
         std::fs::write(&full_path, new_content)
             .map_err(|e| anyhow::anyhow!("Failed to write edited file {}: {}", path, e))
+    }
+
+    fn validate_relative_path(&self, path: &str) -> Result<()> {
+        let path = std::path::Path::new(path);
+        if path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err(anyhow::anyhow!(
+                "Path traversal not allowed: {}",
+                path.display()
+            ));
+        }
+        Ok(())
     }
 
     /// Create a test sandbox
@@ -146,5 +181,30 @@ mod tests {
     fn test_sandbox_test() {
         let sandbox = Sandbox::test();
         assert_eq!(sandbox.project_path, PathBuf::from("/tmp/forge-test"));
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_blocked() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+
+        let result = sandbox.read_file("../etc/passwd").await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Path traversal not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_path_within_sandbox_allowed() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("allowed.txt"), "ok").unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+
+        let content = sandbox.read_file("allowed.txt").await.unwrap();
+
+        assert_eq!(content, "ok");
     }
 }

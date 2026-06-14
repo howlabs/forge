@@ -49,26 +49,23 @@ impl CheckpointBanner {
             return;
         }
 
-        let text = vec![
-            Line::from(vec![
-                Span::styled(
-                    "⚡ ",
-                    Style::default().fg(Color::Yellow),
+        let text = vec![Line::from(vec![
+            Span::styled("⚡ ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(
+                    "Checkpoint available: {} - Press 'R' to resume",
+                    self.task_id
                 ),
-                Span::styled(
-                    format!("Checkpoint available: {} - Press 'R' to resume", self.task_id),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
-        ];
+                Style::default().fg(Color::Yellow),
+            ),
+        ])];
 
-        let paragraph = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title_style(Style::default().fg(Color::Yellow)),
-            );
+        let paragraph = Paragraph::new(text).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title_style(Style::default().fg(Color::Yellow)),
+        );
 
         f.render_widget(paragraph, area);
     }

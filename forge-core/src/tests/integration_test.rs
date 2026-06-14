@@ -75,7 +75,7 @@ impl Database {
         let sandbox = Sandbox::new(temp_dir.path().to_str().unwrap(), "off").unwrap();
         let index_arc = Arc::new(Mutex::new(context_index as dyn ContextIndex));
 
-        let event_loop = EventLoop::new(provider, context, sandbox)
+        let event_loop = EventLoop::new(provider, context, sandbox, "test task".to_string())
             .with_context_index(index_arc.clone());
 
         // 6. Test verify-symbol-before-edit with VALID symbol
@@ -306,7 +306,7 @@ impl RealAPI {
         let context = ContextEngine::new(temp_dir.path()).unwrap();
         let sandbox = Sandbox::new(temp_dir.path().to_str().unwrap(), "off").unwrap();
 
-        let event_loop = EventLoop::new(provider, context, sandbox)
+        let event_loop = EventLoop::new(provider, context, sandbox, "test task".to_string())
             .with_context_index(index.clone());
 
         // Test 1: Try to use REAL method (should succeed)

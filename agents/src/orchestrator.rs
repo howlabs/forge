@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -17,7 +18,7 @@ pub struct MultiAgentOrchestrator {
     /// Git repository path (for creating worktrees)
     repo_path: PathBuf,
     /// Running tasks indexed by task_id
-    tasks: RwLock<HashMap<String, Task>>,
+    tasks: Arc<RwLock<HashMap<String, Task>>>,
     /// Maximum parallel tasks
     max_parallel: usize,
     /// Worktree base directory
@@ -36,7 +37,10 @@ impl MultiAgentOrchestrator {
 
         // Verify repo exists
         if !repo_path.join(".git").exists() {
-            return Err(anyhow::anyhow!("Not a git repository: {}", repo_path.display()));
+            return Err(anyhow::anyhow!(
+                "Not a git repository: {}",
+                repo_path.display()
+            ));
         }
 
         // Create worktree base directory if needed
@@ -47,7 +51,7 @@ impl MultiAgentOrchestrator {
             repo_path,
             worktree_base,
             max_parallel,
-            tasks: RwLock::new(HashMap::new()),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -69,7 +73,10 @@ impl MultiAgentOrchestrator {
             .status()?;
 
         if !status.success() {
-            return Err(anyhow::anyhow!("Failed to create worktree for task {}", task_id));
+            return Err(anyhow::anyhow!(
+                "Failed to create worktree for task {}",
+                task_id
+            ));
         }
 
         info!("Created worktree: {}", worktree_path.display());
@@ -156,25 +163,57 @@ impl Orchestrator for MultiAgentOrchestrator {
         tasks.insert(task.id.clone(), task.clone());
         drop(tasks);
 
-        // TODO: Launch subagent event-loop in worktree
-        // For now, simulate immediate completion
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let task_id = task.id.clone();
+        let task_prompt = task.prompt.clone();
+        let api_key = task.api_key.clone();
+        let model = task.model.clone();
+        let worktree_path_clone = worktree_path.clone();
+        let tasks_ref = self.tasks.clone();
 
-        // Update task to Done
-        let mut tasks = self.tasks.write().await;
-        if let Some(t) = tasks.get_mut(&task.id) {
-            t.status = TaskStatus::Done;
-        }
+        tokio::spawn(async move {
+            use context::ContextEngine;
+            use forge_core::event_loop::EventLoop;
+            use provider::anthropic::AnthropicProvider;
+            use sandbox::Sandbox;
 
-        info!("Task {} completed", task.id);
+            let result = async {
+                let provider = AnthropicProvider::new(&api_key, &model)?;
+                let context = ContextEngine::new(&worktree_path_clone)?;
+                let sandbox = Sandbox::new(&worktree_path_clone, "on")?;
+                let mut event_loop = EventLoop::new(provider, context, sandbox, task_prompt);
+                let steps = event_loop.run().await?;
+                anyhow::Ok(steps)
+            }
+            .await;
+
+            let mut tasks = tasks_ref.write().await;
+            if let Some(t) = tasks.get_mut(&task_id) {
+                match result {
+                    Ok(steps) => {
+                        t.status = TaskStatus::Done;
+                        t.steps = steps;
+                        t.result = Some(format!("Completed in {} steps", steps));
+                    }
+                    Err(error) => {
+                        t.status = TaskStatus::Failed;
+                        t.result = Some(error.to_string());
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 
     async fn join_all(&mut self) -> Result<Vec<Task>> {
         info!("Waiting for all tasks to complete");
 
-        // Wait for all running tasks (simulate for now)
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        loop {
+            if self.running_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
         // Collect all tasks
         let tasks = self.tasks.read().await;
@@ -186,6 +225,9 @@ impl Orchestrator for MultiAgentOrchestrator {
             if task.status == TaskStatus::Done {
                 if let Err(e) = self.merge_worktree(&task.id) {
                     warn!("Failed to merge task {}: {}", task.id, e);
+                }
+                if let Err(e) = self.remove_worktree(&task.id) {
+                    warn!("Failed to remove worktree {}: {}", task.id, e);
                 }
             }
         }
@@ -221,14 +263,35 @@ impl Orchestrator for MultiAgentOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn init_git_repo() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test User",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        dir
+    }
 
     #[tokio::test]
     async fn test_orchestrator_creation() {
-        let orchestrator = MultiAgentOrchestrator::new(
-            "/tmp/test_repo",
-            "/tmp/test_worktrees",
-            2,
-        );
+        let orchestrator = MultiAgentOrchestrator::new("/tmp/test_repo", "/tmp/test_worktrees", 2);
 
         // Will fail because /tmp/test_repo is not a git repo
         assert!(orchestrator.is_err());
@@ -236,8 +299,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_spawn_simulation() {
-        // This test requires a real git repo, skip for now
-        // TODO: Setup test git repo
-        // Empty test for now
+        let repo = init_git_repo();
+        let worktrees = TempDir::new().unwrap();
+        let orchestrator = MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
+        let worktree_path = orchestrator.create_worktree("test-task").unwrap();
+
+        assert!(worktree_path.exists());
+        assert!(worktree_path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_records_running_task_in_worktree() {
+        let repo = init_git_repo();
+        let worktrees = TempDir::new().unwrap();
+        let mut orchestrator =
+            MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
+        let task = Task::new("do work", PathBuf::new()).with_provider("test-key", "test-model");
+        let task_id = task.id.clone();
+
+        orchestrator.spawn(task).await.unwrap();
+
+        let tasks = orchestrator.tasks.read().await;
+        let stored = tasks.get(&task_id).unwrap();
+        assert!(stored.worktree.exists());
+        assert!(matches!(
+            stored.status,
+            TaskStatus::Running | TaskStatus::Failed
+        ));
     }
 }

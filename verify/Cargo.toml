@@ -9,5 +9,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 agents = { path = "../agents" }
+forge-core = { path = "../forge-core" }
 serde_json = "1.0"
 async-trait = "0.1"

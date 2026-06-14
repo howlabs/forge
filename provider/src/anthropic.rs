@@ -121,8 +121,7 @@ impl ModelProvider for AnthropicProvider {
                 "tool_use" => {
                     if let (Some(id), Some(name), Some(input)) = (item.id, item.name, item.input) {
                         let arguments: HashMap<String, serde_json::Value> =
-                            serde_json::from_value(input)
-                                .unwrap_or_else(|_| HashMap::new());
+                            serde_json::from_value(input).unwrap_or_else(|_| HashMap::new());
 
                         tool_calls.push(ToolCall {
                             id,
@@ -160,10 +159,7 @@ mod tests {
 
     #[test]
     fn test_convert_messages() {
-        let messages = vec![
-            Message::system("You are helpful"),
-            Message::user("Hello"),
-        ];
+        let messages = vec![Message::system("You are helpful"), Message::user("Hello")];
 
         let (chat_messages, system) = AnthropicProvider::convert_messages(&messages);
 

@@ -3,27 +3,25 @@
 //! This module contains all the UI panels that make up the TUI interface.
 
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    widgets::BorderType,
+    layout::{Constraint, Direction, Layout, Rect},
     Frame,
 };
 
 use crate::app::AppEvent;
 
-pub mod conversation;
-pub mod input;
-pub mod diff_viewer;
 pub mod agent_panel;
-pub mod status_bar;
 pub mod checkpoint_banner;
+pub mod conversation;
+pub mod diff_viewer;
+pub mod input;
+pub mod status_bar;
 
-use conversation::ConversationPanel;
-use input::InputBox;
-use diff_viewer::DiffViewer;
 use agent_panel::AgentActivityPanel;
-use status_bar::StatusBar;
 use checkpoint_banner::CheckpointBanner;
+use conversation::ConversationPanel;
+use diff_viewer::DiffViewer;
+use input::InputBox;
+use status_bar::StatusBar;
 
 /// Collection of all UI panels
 pub struct Panels {
@@ -40,7 +38,7 @@ pub struct Panels {
     /// Checkpoint banner (shows when resume available)
     pub checkpoint_banner: Option<CheckpointBanner>,
     /// Event sender
-    event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    _event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     /// Current focus (which panel gets keyboard input)
     focus: Focus,
     /// Plan vs Build mode
@@ -49,6 +47,7 @@ pub struct Panels {
 
 /// Which panel has keyboard focus
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum Focus {
     Input,
     DiffViewer,
@@ -65,7 +64,7 @@ impl Panels {
             agent_panel: AgentActivityPanel::new(),
             status_bar: StatusBar::new(),
             checkpoint_banner: None,
-            event_tx,
+            _event_tx: event_tx,
             focus: Focus::Input,
             plan_mode: false,
         }

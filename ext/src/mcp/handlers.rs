@@ -2,7 +2,7 @@
 //!
 //! Implements handlers for various MCP request types.
 
-use super::protocol::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
+use super::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use super::server::McpServer;
 use anyhow::Result;
 
@@ -58,8 +58,14 @@ fn handle_list_tools(server: &McpServer, request: &JsonRpcRequest) -> Result<Jso
 fn handle_call_tool(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
     // For v0.190.0, return a simple response
     // Real tool execution happens in Forge's event loop
-    let params = request.params.as_ref().ok_or_else(|| anyhow::anyhow!("No params"))?;
-    let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let params = request
+        .params
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No params"))?;
+    let tool_name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
     // Verify tool exists
     if server.get_tool(tool_name).is_none() {
@@ -133,7 +139,7 @@ mod tests {
         server.register_tool(
             "test".to_string(),
             "Test tool".to_string(),
-            serde_json::json!({"type": "object"})
+            serde_json::json!({"type": "object"}),
         );
 
         let request = JsonRpcRequest {
@@ -155,7 +161,7 @@ mod tests {
         server.register_tool(
             "my_tool".to_string(),
             "My tool".to_string(),
-            serde_json::json!({"type": "object"})
+            serde_json::json!({"type": "object"}),
         );
 
         let request = JsonRpcRequest {

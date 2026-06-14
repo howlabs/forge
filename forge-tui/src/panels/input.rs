@@ -8,8 +8,7 @@
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
+    style::{Color, Style},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
@@ -51,8 +50,14 @@ impl InputBox {
     /// Handle keyboard event
     pub fn handle_key_event(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char(c) => {
-                self.insert_char(c);
+            KeyCode::Char('/') => {
+                // Start command palette if at beginning of line
+                if self.get_current_line().trim().is_empty() {
+                    self.command_palette = true;
+                    self.insert_char('/');
+                } else {
+                    self.insert_char('/');
+                }
             }
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -91,14 +96,8 @@ impl InputBox {
                     self.move_cursor_down();
                 }
             }
-            KeyCode::Char('/') => {
-                // Start command palette if at beginning of line
-                if self.get_current_line().trim().is_empty() {
-                    self.command_palette = true;
-                    self.insert_char('/');
-                } else {
-                    self.insert_char('/');
-                }
+            KeyCode::Char(c) => {
+                self.insert_char(c);
             }
             KeyCode::Esc => {
                 // Cancel command palette
@@ -378,6 +377,12 @@ impl InputBox {
 
         // Note: In real implementation, you'd use f.set_cursor here
         // but for now we'll skip cursor positioning
+    }
+}
+
+impl Default for InputBox {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

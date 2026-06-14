@@ -6,6 +6,7 @@ use agents::traits::Verifier;
 use agents::types::VerifyReport;
 use anyhow::Result;
 use async_trait::async_trait;
+use forge_core::{Verifier as CoreVerifier, VerifyReport as CoreVerifyReport};
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -100,10 +101,7 @@ impl Verifier for BuildVerifier {
         let duration = start.elapsed();
         let passed = build_result.is_ok() && test_result.is_ok();
 
-        let logs = format!(
-            "=== BUILD ==={}\n=== TESTS ==={}",
-            build_logs, test_logs
-        );
+        let logs = format!("=== BUILD ==={}\n=== TESTS ==={}", build_logs, test_logs);
 
         Ok(VerifyReport {
             passed,
@@ -129,6 +127,22 @@ impl Verifier for BuildVerifier {
     }
 }
 
+#[async_trait]
+impl CoreVerifier for BuildVerifier {
+    async fn verify(&self, workdir: &Path) -> Result<CoreVerifyReport> {
+        let report = <Self as Verifier>::verify(self, workdir).await?;
+        Ok(CoreVerifyReport {
+            passed: report.passed,
+            logs: report.logs,
+            duration_ms: report.duration_ms,
+        })
+    }
+
+    async fn quick_check(&self, workdir: &Path) -> Result<bool> {
+        <Self as Verifier>::quick_check(self, workdir).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn test_quick_check_missing_cargo_toml() {
         let verifier = BuildVerifier::new();
-        let result = verifier.quick_check(Path::new("/tmp/nonexistent")).await;
+        let result = agents::Verifier::quick_check(&verifier, Path::new("/tmp/nonexistent")).await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
     }

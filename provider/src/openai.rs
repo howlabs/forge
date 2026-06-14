@@ -2,13 +2,14 @@
 //!
 //! Provides ModelProvider trait implementation for OpenAI's GPT models.
 
-use super::types::{ChatResponse, Message, MessageRole};
 use super::traits::ModelProvider;
+use super::types::{ChatResponse, Message, MessageRole, ToolCall};
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 
 /// OpenAI API provider
 pub struct OpenAIProvider {
@@ -30,7 +31,21 @@ struct OpenAIChoice {
 
 #[derive(Debug, Deserialize)]
 struct OpenAIMessage {
-    content: String,
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<OpenAIToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIToolCall {
+    id: String,
+    function: OpenAIFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIFunction {
+    name: String,
+    arguments: String,
 }
 
 impl OpenAIProvider {
@@ -47,7 +62,7 @@ impl OpenAIProvider {
     pub fn with_base_url(
         model: impl Into<String>,
         api_key: impl Into<String>,
-        base_url: impl Into<String>
+        base_url: impl Into<String>,
     ) -> Self {
         Self {
             model: model.into(),
@@ -64,14 +79,44 @@ impl OpenAIProvider {
     fn convert_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         messages
             .iter()
-            .map(|m| {
-                match m.role {
-                    MessageRole::User => json!({"role": "user", "content": m.content}),
-                    MessageRole::Assistant => json!({"role": "assistant", "content": m.content}),
-                    MessageRole::System => json!({"role": "system", "content": m.content}),
-                }
+            .map(|m| match m.role {
+                MessageRole::User => json!({"role": "user", "content": m.content}),
+                MessageRole::Assistant => json!({"role": "assistant", "content": m.content}),
+                MessageRole::System => json!({"role": "system", "content": m.content}),
             })
             .collect()
+    }
+
+    fn parse_chat_response(response: &str) -> Result<ChatResponse> {
+        let openai_response: OpenAIResponse = serde_json::from_str(response)?;
+        Self::chat_response_from_openai(openai_response)
+    }
+
+    fn chat_response_from_openai(openai_response: OpenAIResponse) -> Result<ChatResponse> {
+        let message = &openai_response
+            .choices
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No choices in response"))?
+            .message;
+
+        let tool_calls = message
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                let arguments: HashMap<String, serde_json::Value> =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                ToolCall {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    arguments,
+                }
+            })
+            .collect();
+
+        Ok(ChatResponse {
+            content: message.content.clone().unwrap_or_default(),
+            tool_calls,
+        })
     }
 }
 
@@ -80,7 +125,9 @@ impl ModelProvider for OpenAIProvider {
     async fn chat(&self, messages: &[Message]) -> Result<ChatResponse> {
         let openai_messages = Self::convert_messages(messages);
 
-        let url = self.base_url.as_deref()
+        let url = self
+            .base_url
+            .as_deref()
             .unwrap_or("https://api.openai.com/v1/chat/completions");
 
         let response = self
@@ -100,19 +147,8 @@ impl ModelProvider for OpenAIProvider {
             return Err(anyhow::anyhow!("OpenAI API error: {}", error_text));
         }
 
-        let openai_response: OpenAIResponse = response.json().await?;
-        let content = openai_response
-            .choices
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No choices in response"))?
-            .message
-            .content
-            .clone();
-
-        Ok(ChatResponse {
-            content,
-            tool_calls: vec![],
-        })
+        let response_text = response.text().await?;
+        Self::parse_chat_response(&response_text)
     }
 
     fn model(&self) -> &str {
@@ -154,7 +190,7 @@ mod tests {
         let provider = OpenAIProvider::with_base_url(
             "glm-5.1",
             "test-key",
-            "https://api.z.ai/api/paas/v4/chat/completions"
+            "https://api.z.ai/api/paas/v4/chat/completions",
         );
 
         assert_eq!(provider.model(), "glm-5.1");
@@ -162,6 +198,48 @@ mod tests {
             provider.base_url(),
             Some("https://api.z.ai/api/paas/v4/chat/completions")
         );
+    }
+
+    #[test]
+    fn test_parse_response_with_tool_calls() {
+        let json = r#"{
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"src/main.rs\"}"
+                        }
+                    }]
+                }
+            }]
+        }"#;
+
+        let response = OpenAIProvider::parse_chat_response(json).unwrap();
+
+        assert_eq!(response.content, "");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_123");
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(response.tool_calls[0].arguments["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_parse_response_without_tool_calls() {
+        let json = r#"{
+            "choices": [{
+                "message": {
+                    "content": "Hello from OpenAI"
+                }
+            }]
+        }"#;
+
+        let response = OpenAIProvider::parse_chat_response(json).unwrap();
+
+        assert_eq!(response.content, "Hello from OpenAI");
+        assert!(response.tool_calls.is_empty());
     }
 
     // Integration test with real Z.AI API
@@ -174,9 +252,9 @@ mod tests {
             .expect("Set ZAI_API_KEY environment variable to run this test");
 
         let provider = OpenAIProvider::with_base_url(
-            "glm-4.5-air",  // Cheaper model for testing
+            "glm-4.5-air", // Cheaper model for testing
             api_key,
-            "https://api.z.ai/api/paas/v4/chat/completions"
+            "https://api.z.ai/api/paas/v4/chat/completions",
         );
 
         let messages = vec![Message::user("Say hello in one sentence")];

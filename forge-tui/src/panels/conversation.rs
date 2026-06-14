@@ -37,9 +37,10 @@ impl ConversationPanel {
         // Split into lines and add to content
         let lines: Vec<&str> = text.lines().collect();
         for line in lines {
-            let line = Line::from(vec![
-                Span::styled(line.to_string(), Style::default().fg(Color::White)),
-            ]);
+            let line = Line::from(vec![Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            )]);
             self.content.push(line);
         }
 
@@ -58,12 +59,10 @@ impl ConversationPanel {
         };
 
         // Add role prefix
-        let role_line = Line::from(vec![
-            Span::styled(
-                format!("{}: ", role.as_str()),
-                Style::default().fg(role_color).add_modifier(Modifier::BOLD),
-            ),
-        ]);
+        let role_line = Line::from(vec![Span::styled(
+            format!("{}: ", role.as_str()),
+            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+        )]);
         self.content.push(role_line);
 
         // Add message content (with basic markdown support)
@@ -90,13 +89,17 @@ impl ConversationPanel {
             // Code block
             spans.push(Span::styled(
                 line.to_string(),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         } else if line.starts_with("# ") {
             // Header
             spans.push(Span::styled(
                 line.to_string(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
         } else if line.starts_with("- ") || line.starts_with("* ") {
             // List item
@@ -117,7 +120,10 @@ impl ConversationPanel {
             }
         } else {
             // Regular text
-            spans.push(Span::styled(line.to_string(), Style::default().fg(Color::White)));
+            spans.push(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            ));
         }
 
         Line::from(spans)
@@ -126,11 +132,7 @@ impl ConversationPanel {
     /// Scroll to bottom
     fn scroll_to_bottom(&mut self) {
         let content_len = self.content.len();
-        self.scroll_offset = if content_len > 50 {
-            content_len - 50
-        } else {
-            0
-        };
+        self.scroll_offset = content_len.saturating_sub(50);
     }
 
     /// Scroll up
@@ -157,7 +159,8 @@ impl ConversationPanel {
 
     /// Render the panel
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let visible_lines: Vec<Line> = self.content
+        let visible_lines: Vec<Line> = self
+            .content
             .iter()
             .skip(self.scroll_offset)
             .take(area.height as usize)
@@ -175,6 +178,12 @@ impl ConversationPanel {
             .scroll((self.scroll_offset as u16, 0));
 
         f.render_widget(paragraph, area);
+    }
+}
+
+impl Default for ConversationPanel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

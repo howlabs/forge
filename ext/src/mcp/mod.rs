@@ -12,7 +12,7 @@ pub mod transport;
 
 pub use client::McpClient;
 pub use handlers::handle_request;
-pub use protocol::{JsonRpcRequest, JsonRpcResponse, JsonRpcError, McpTool, McpResource};
+pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpResource, McpTool};
 pub use server::McpServer;
 pub use server_process::ServerProcess;
 pub use transport::StdioTransport;

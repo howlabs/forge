@@ -13,16 +13,7 @@
 //! - **Responsive**: Never blocks the UI thread (<16ms render time)
 
 use anyhow::Result;
-use ratatui::{
-    backend::Backend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
-    Frame, Terminal,
-};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use ratatui::{backend::Backend, style::Color, Terminal};
 
 pub mod app;
 pub mod command_palette;
@@ -88,10 +79,7 @@ impl Default for Theme {
 }
 
 /// Main TUI entry point
-pub async fn run_tui<B: Backend>(
-    terminal: &mut Terminal<B>,
-    config: TuiConfig,
-) -> Result<()> {
+pub async fn run_tui<B: Backend>(terminal: &mut Terminal<B>, config: TuiConfig) -> Result<()> {
     let mut app = TuiApp::new(config);
     app.run(terminal).await
 }

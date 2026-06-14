@@ -115,8 +115,8 @@ impl DiffViewer {
         let mut in_hunk = false;
 
         for i in 0..max_lines {
-            let old_line = old_lines.get(i).map(|s| *s).unwrap_or("");
-            let new_line = new_lines.get(i).map(|s| *s).unwrap_or("");
+            let old_line = old_lines.get(i).copied().unwrap_or("");
+            let new_line = new_lines.get(i).copied().unwrap_or("");
 
             if old_line != new_line {
                 if !in_hunk {
@@ -286,7 +286,8 @@ impl DiffViewer {
 
     /// Get approved hunks for application
     pub fn get_approved_hunks(&self) -> Vec<&DiffHunk> {
-        self.diffs.iter()
+        self.diffs
+            .iter()
             .filter(|h| h.state == HunkState::Approved || h.state == HunkState::Modified)
             .collect()
     }
@@ -360,6 +361,12 @@ impl DiffViewer {
             .wrap(Wrap { trim: false });
 
         f.render_widget(paragraph, area);
+    }
+}
+
+impl Default for DiffViewer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
