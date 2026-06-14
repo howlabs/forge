@@ -13,6 +13,11 @@ use tracing::debug;
 use tree_sitter::{Node, Parser};
 
 pub mod agents;
+pub mod engine;
+pub mod graph;
+pub mod lang;
+pub mod symbols;
+pub mod vector;
 
 // =============================================================================
 // SHARED CONTRACT - Frozen before splitting into parallel tracks
