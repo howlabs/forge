@@ -9,19 +9,22 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 
-# Tree-sitter for parsing
-tree-sitter = "0.20"
-tree-sitter-rust = "0.20"
+# Tree-sitter for parsing (pinned exact versions for reproducibility)
+tree-sitter = "=0.20.10"
+tree-sitter-rust = "=0.20.4"
+tree-sitter-python = "=0.20.4"
+tree-sitter-javascript = "=0.20.4"
+tree-sitter-typescript = "=0.20.5"
 walkdir = "2"
 
-# Knowledge graph
+# Knowledge graph (pre-existing; used by v0.100.0 KnowledgeGraph)
 petgraph = "0.6"
 
-# Vector store & embeddings - using simple in-memory implementation for MVP
-# Simple embedding with tokenization (we'll use a basic approach for MVP)
-fnv = "1.0"  # For hashing symbol IDs
+# Vector store & embeddings (pre-existing; used by v0.100.0 hashing)
+fnv = "1.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }
