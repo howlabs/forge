@@ -47,39 +47,50 @@ forge/
 
 ## Roadmap
 
-### v0.98.0 (Current - MVP)
+### v0.100.0 (Current - MVP)
 - ✅ CLI + core loop (tool->observe->act)
 - ✅ Provider with ONE provider (Anthropic)
 - ✅ File read/diff-edit + run command
 - ✅ Sandbox network-off
 - ✅ Load AGENTS.md
 
-### v0.100.0
+### v0.130.0
 - Context engine with tree-sitter index
 - Knowledge graph
 - Local vector store
 - Semantic retrieval replaces grep
 
-### v0.130.0
+### v0.150.0
 - Incremental sync (file watcher)
 - Verify-symbol-before-edit
 
-### v0.150.0
+### v0.170.0
 - Agents orchestrator
 - Isolated subagents
 - Auto git worktree per subagent
 
-### v0.170.0
+### v0.180.0
 - Checkpoint/resume
 - Mandatory verify loop (test/build)
 
-### v0.180.0
+### v0.190.0
 - MCP client/server
 - Hooks system
 - Skills framework
 - `forge exec` headless
 - Multi-provider including local
 - Basic observability
+
+## Versioning
+
+Forge follows Semantic Versioning (`MAJOR.MINOR.PATCH`) with explicit `v`-prefixed release tags.
+
+- Use plain versions in package metadata, for example `0.100.0` in `Cargo.toml`.
+- Use `v` prefixes for Git tags, release headings, and roadmap milestones, for example `v0.100.0`.
+- While Forge is in the `0.x` phase, increment `MINOR` for milestone releases, user-visible features, or contract changes.
+- Increment `PATCH` for compatible bug fixes, documentation updates, test improvements, and internal refactors that do not change behavior.
+- Document every release in `CHANGELOG.md`; breaking changes before `v1.0.0` must still be called out explicitly.
+- Keep all workspace crates on the same Forge version unless a crate is intentionally split into an independently released package.
 
 ## Building
 

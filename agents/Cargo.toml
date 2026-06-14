@@ -11,5 +11,10 @@ tracing = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
+forge-core = { path = "../forge-core" }
+provider = { path = "../provider" }
+context = { path = "../context" }
+sandbox = { path = "../sandbox" }
 
-# TODO: v0.170.0 - Add agent orchestration dependencies
+[dev-dependencies]
+tempfile = { workspace = true }

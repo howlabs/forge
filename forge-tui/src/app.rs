@@ -8,9 +8,8 @@
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{self, Event, KeyCode, KeyEvent},
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{backend::Backend, Terminal};
 use std::sync::Arc;
@@ -21,8 +20,8 @@ use crate::{panels::Panels, TuiConfig};
 use ratatui::layout::{Constraint, Direction, Layout};
 
 // Import provider types for real streaming
-pub use provider::ModelProvider;
 pub use provider::types::{Message, MessageRole};
+pub use provider::ModelProvider;
 
 // Import Forge types for TUI integration
 use context::ContextEngine;
@@ -39,11 +38,11 @@ pub struct TuiApp {
     /// Event receiver
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
     /// Optional model provider for real streaming
-    provider: Option<Arc<dyn ModelProvider>>,
+    _provider: Option<Arc<dyn ModelProvider>>,
     /// Optional context engine
-    context: Option<Arc<context::ContextEngine>>,
+    _context: Option<Arc<context::ContextEngine>>,
     /// Optional sandbox
-    sandbox: Option<Arc<sandbox::Sandbox>>,
+    _sandbox: Option<Arc<sandbox::Sandbox>>,
 }
 
 /// Events that can update the TUI state
@@ -73,9 +72,9 @@ impl TuiApp {
             panels: Panels::new(event_tx),
             running: true,
             event_rx,
-            provider: None,
-            context: None,
-            sandbox: None,
+            _provider: None,
+            _context: None,
+            _sandbox: None,
         }
     }
 
@@ -93,9 +92,9 @@ impl TuiApp {
             panels: Panels::new(event_tx),
             running: true,
             event_rx,
-            provider: Some(provider),
-            context: Some(context),
-            sandbox: Some(sandbox),
+            _provider: Some(provider),
+            _context: Some(context),
+            _sandbox: Some(sandbox),
         }
     }
 

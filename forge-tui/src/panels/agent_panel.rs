@@ -93,16 +93,14 @@ impl AgentActivityPanel {
 
     /// Update agent status
     pub fn update_status(&mut self, id: String, status: String) {
-        let agent = self.agents.entry(id.clone()).or_insert_with(|| {
-            AgentState {
-                id: id.clone(),
-                task: "Unknown task".to_string(),
-                worktree: String::new(),
-                status: AgentStatus::Pending,
-                progress: 0.0,
-                tool_calls: 0,
-                elapsed: 0,
-            }
+        let agent = self.agents.entry(id.clone()).or_insert_with(|| AgentState {
+            id: id.clone(),
+            task: "Unknown task".to_string(),
+            worktree: String::new(),
+            status: AgentStatus::Pending,
+            progress: 0.0,
+            tool_calls: 0,
+            elapsed: 0,
         });
 
         // Parse status string to enum
@@ -136,7 +134,8 @@ impl AgentActivityPanel {
 
     /// Get number of active agents (running or verifying)
     pub fn active_count(&self) -> usize {
-        self.agents.values()
+        self.agents
+            .values()
             .filter(|a| matches!(a.status, AgentStatus::Running | AgentStatus::Verifying))
             .count()
     }
@@ -147,24 +146,22 @@ impl AgentActivityPanel {
 
         // Header
         let active_count = self.active_count();
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("Parallel Agents ({} active)", active_count),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("Parallel Agents ({} active)", active_count),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]));
 
         lines.push(Line::from(""));
 
         // Sort agents by status (active first)
         let mut agents: Vec<_> = self.agents.values().collect();
-        agents.sort_by_key(|a| {
-            match a.status {
-                AgentStatus::Running | AgentStatus::Verifying => 0,
-                AgentStatus::Pending => 1,
-                AgentStatus::Done => 2,
-                AgentStatus::Failed => 3,
-            }
+        agents.sort_by_key(|a| match a.status {
+            AgentStatus::Running | AgentStatus::Verifying => 0,
+            AgentStatus::Pending => 1,
+            AgentStatus::Done => 2,
+            AgentStatus::Failed => 3,
         });
 
         // Render each agent
@@ -177,17 +174,18 @@ impl AgentActivityPanel {
                 Span::raw(" "),
                 Span::styled(&agent.id, Style::default().fg(Color::White)),
                 Span::raw(": "),
-                Span::styled(
-                    &agent.task,
-                    Style::default().fg(Color::Gray),
-                ),
+                Span::styled(&agent.task, Style::default().fg(Color::Gray)),
             ]));
 
             // Progress bar for running agents
             if matches!(agent.status, AgentStatus::Running | AgentStatus::Verifying) {
                 let progress_width = 20;
                 let filled = (agent.progress * progress_width as f32) as usize;
-                let progress_bar_content = format!("{}{}", "█".repeat(filled), "─".repeat((progress_width as usize).saturating_sub(filled)));
+                let progress_bar_content = format!(
+                    "{}{}",
+                    "█".repeat(filled),
+                    "─".repeat((progress_width as usize).saturating_sub(filled))
+                );
                 let percentage = format!(" {}%", (agent.progress * 100.0) as u32);
 
                 lines.push(Line::from(vec![
@@ -210,7 +208,10 @@ impl AgentActivityPanel {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        format!("Tool calls: {} | Elapsed: {}s", agent.tool_calls, agent.elapsed),
+                        format!(
+                            "Tool calls: {} | Elapsed: {}s",
+                            agent.tool_calls, agent.elapsed
+                        ),
                         Style::default().fg(Color::Gray),
                     ),
                 ]));
@@ -221,12 +222,10 @@ impl AgentActivityPanel {
 
         // Empty state
         if self.agents.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "No parallel agents running",
-                    Style::default().fg(Color::Gray),
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "No parallel agents running",
+                Style::default().fg(Color::Gray),
+            )]));
         }
 
         let paragraph = Paragraph::new(lines)
@@ -239,6 +238,12 @@ impl AgentActivityPanel {
             .wrap(Wrap { trim: false });
 
         f.render_widget(paragraph, area);
+    }
+}
+
+impl Default for AgentActivityPanel {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

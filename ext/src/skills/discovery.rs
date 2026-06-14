@@ -83,7 +83,8 @@ description: Test skill
 ---
 
 Test prompt"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let discovery = SkillDiscovery::new(skills_dir);
         let skills = discovery.discover().unwrap();
@@ -107,7 +108,8 @@ description: First skill
 ---
 
 Prompt 1"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::write(
             skills_dir.join("skill2.md"),
@@ -117,7 +119,8 @@ description: Second skill
 ---
 
 Prompt 2"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let discovery = SkillDiscovery::new(skills_dir);
         let skills = discovery.discover().unwrap();
@@ -139,7 +142,8 @@ description: Target skill
 ---
 
 Target prompt"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let discovery = SkillDiscovery::new(skills_dir);
         let skill = discovery.get_skill("target-skill").unwrap();
@@ -174,7 +178,8 @@ description: Exists skill
 ---
 
 Exists"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let discovery = SkillDiscovery::new(skills_dir);
         assert!(discovery.has_skill("exists"));

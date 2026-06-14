@@ -51,10 +51,7 @@ impl HookRegistry {
 
     /// Get all hooks for an event type
     pub fn get_hooks(&self, event_type: &str) -> Vec<PathBuf> {
-        self.hooks
-            .get(event_type)
-            .cloned()
-            .unwrap_or_default()
+        self.hooks.get(event_type).cloned().unwrap_or_default()
     }
 
     /// Trigger all hooks for an event (placeholder for v0.190.0)
@@ -73,7 +70,11 @@ impl HookRegistry {
             if hook_script.exists() {
                 // Execute hook script with payload as stdin
                 // For v0.190.0, just log (full execution in next task)
-                tracing::info!("Executing hook: {:?} for event: {}", hook_script, event_type);
+                tracing::info!(
+                    "Executing hook: {:?} for event: {}",
+                    hook_script,
+                    event_type
+                );
                 tracing::debug!("Hook payload: {}", payload);
             } else {
                 tracing::warn!("Hook script not found: {:?}", hook_script);
@@ -92,8 +93,8 @@ impl Default for HookRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::TaskCreatedEvent;
+    use super::*;
 
     #[test]
     fn test_hook_registry_creation() {
@@ -142,9 +143,7 @@ TaskCompleted = ["/hook3.sh"]
 
         // Should not fail even with no hooks registered
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(async {
-            registry.trigger(&event).await
-        });
+        let result = rt.block_on(async { registry.trigger(&event).await });
         assert!(result.is_ok());
     }
 
@@ -166,9 +165,7 @@ TaskCompleted = ["/hook3.sh"]
 
         // Should not fail
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(async {
-            registry.trigger(&event).await
-        });
+        let result = rt.block_on(async { registry.trigger(&event).await });
         assert!(result.is_ok());
     }
 

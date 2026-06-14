@@ -7,16 +7,16 @@ use std::path::PathBuf;
 use std::process::Command;
 use tracing::{debug, info};
 
-pub mod verifier;
 pub mod checkpoint_store;
+pub mod verifier;
 
 // Re-export implementations
-pub use verifier::BuildVerifier;
 pub use checkpoint_store::FileCheckpointStore;
+pub use verifier::BuildVerifier;
 
 // Re-export shared types and traits from forge-agents
-pub use agents::{Task, TaskStatus, VerifyReport, Checkpoint};
-pub use agents::{Orchestrator, Verifier, CheckpointStore};
+pub use agents::{Checkpoint, Task, TaskStatus, VerifyReport};
+pub use agents::{CheckpointStore, Orchestrator, Verifier};
 
 // Legacy verification loop (kept for compatibility)
 /// Verify loop: run tests and build before reporting done

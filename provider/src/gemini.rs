@@ -2,13 +2,14 @@
 //!
 //! Provides ModelProvider trait implementation for Google's Gemini models.
 
-use super::types::{ChatResponse, Message, MessageRole};
 use super::traits::ModelProvider;
+use super::types::{ChatResponse, Message, MessageRole, ToolCall};
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 
 /// Gemini API provider
 pub struct GeminiProvider {
@@ -34,7 +35,15 @@ struct GeminiContent {
 
 #[derive(Debug, Deserialize)]
 struct GeminiPart {
-    text: String,
+    text: Option<String>,
+    #[serde(rename = "functionCall")]
+    function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    args: HashMap<String, serde_json::Value>,
 }
 
 impl GeminiProvider {
@@ -59,12 +68,61 @@ impl GeminiProvider {
             })
             .collect()
     }
+
+    fn build_request_body(messages: &[Message]) -> serde_json::Value {
+        let gemini_messages = Self::convert_messages(messages);
+        let system_content = messages
+            .iter()
+            .find(|m| matches!(m.role, MessageRole::System))
+            .map(|m| m.content.as_str());
+
+        let mut body = json!({ "contents": gemini_messages });
+        if let Some(system) = system_content {
+            body["systemInstruction"] = json!({ "parts": [{"text": system}] });
+        }
+        body
+    }
+
+    fn parse_chat_response(response: &str) -> Result<ChatResponse> {
+        let gemini_response: GeminiResponse = serde_json::from_str(response)?;
+        Self::chat_response_from_gemini(gemini_response)
+    }
+
+    fn chat_response_from_gemini(gemini_response: GeminiResponse) -> Result<ChatResponse> {
+        let parts = &gemini_response
+            .candidates
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("No candidates in response"))?
+            .content
+            .parts;
+
+        let content = parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("");
+
+        let tool_calls = parts
+            .iter()
+            .filter_map(|part| part.function_call.as_ref())
+            .map(|function_call| ToolCall {
+                id: function_call.name.clone(),
+                name: function_call.name.clone(),
+                arguments: function_call.args.clone(),
+            })
+            .collect();
+
+        Ok(ChatResponse {
+            content,
+            tool_calls,
+        })
+    }
 }
 
 #[async_trait]
 impl ModelProvider for GeminiProvider {
     async fn chat(&self, messages: &[Message]) -> Result<ChatResponse> {
-        let gemini_messages = Self::convert_messages(messages);
+        let body = Self::build_request_body(messages);
 
         let response = self
             .client
@@ -72,9 +130,7 @@ impl ModelProvider for GeminiProvider {
                 "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
                 self.model, self.api_key
             ))
-            .json(&json!({
-                "contents": gemini_messages
-            }))
+            .json(&body)
             .send()
             .await?;
 
@@ -83,22 +139,8 @@ impl ModelProvider for GeminiProvider {
             return Err(anyhow::anyhow!("Gemini API error: {}", error_text));
         }
 
-        let gemini_response: GeminiResponse = response.json().await?;
-        let content = gemini_response
-            .candidates
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No candidates in response"))?
-            .content
-            .parts
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No parts in content"))?
-            .text
-            .clone();
-
-        Ok(ChatResponse {
-            content,
-            tool_calls: vec![],
-        })
+        let response_text = response.text().await?;
+        Self::parse_chat_response(&response_text)
     }
 
     fn model(&self) -> &str {
@@ -151,5 +193,60 @@ mod tests {
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0]["role"], "user");
         assert_eq!(converted[1]["role"], "model");
+    }
+
+    #[test]
+    fn test_build_request_body_includes_system_instruction() {
+        let messages = vec![
+            Message::system("Follow system guidance"),
+            Message::user("Hello"),
+        ];
+
+        let body = GeminiProvider::build_request_body(&messages);
+
+        assert_eq!(body["contents"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "Follow system guidance"
+        );
+    }
+
+    #[test]
+    fn test_parse_response_with_tool_calls() {
+        let json = r#"{
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "write_file",
+                            "args": {"path": "README.md", "content": "hi"}
+                        }
+                    }]
+                }
+            }]
+        }"#;
+
+        let response = GeminiProvider::parse_chat_response(json).unwrap();
+
+        assert_eq!(response.content, "");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "write_file");
+        assert_eq!(response.tool_calls[0].arguments["path"], "README.md");
+    }
+
+    #[test]
+    fn test_parse_response_without_tool_calls() {
+        let json = r#"{
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "Hello from Gemini"}]
+                }
+            }]
+        }"#;
+
+        let response = GeminiProvider::parse_chat_response(json).unwrap();
+
+        assert_eq!(response.content, "Hello from Gemini");
+        assert!(response.tool_calls.is_empty());
     }
 }

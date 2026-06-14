@@ -19,9 +19,15 @@ pub enum SlashCommand {
     /// Change model: /model <model_name>
     Model { model: String },
     /// Manage context: /context <add|remove|list> [path]
-    Context { action: String, path: Option<String> },
+    Context {
+        action: String,
+        path: Option<String>,
+    },
     /// Manage agents: /agents <list|kill> [agent_id]
-    Agents { action: String, agent_id: Option<String> },
+    Agents {
+        action: String,
+        agent_id: Option<String>,
+    },
     /// Resume from checkpoint: /resume <task_id>
     Resume { task_id: String },
     /// Show diff viewer: /diff [file_path]
@@ -77,7 +83,9 @@ impl SlashCommand {
     /// Get command description for help
     pub fn description(&self) -> String {
         match self {
-            SlashCommand::Model { .. } => "Change AI model (e.g., /model claude-3-5-sonnet)".to_string(),
+            SlashCommand::Model { .. } => {
+                "Change AI model (e.g., /model claude-3-5-sonnet)".to_string()
+            }
             SlashCommand::Context { .. } => "Manage context (add/remove/list files)".to_string(),
             SlashCommand::Agents { .. } => "Manage parallel agents (list/kill)".to_string(),
             SlashCommand::Resume { .. } => "Resume from checkpoint".to_string(),

@@ -25,8 +25,14 @@ impl ServerProcess {
             .stdout(std::process::Stdio::piped())
             .spawn()?;
 
-        let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("No stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("No stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("No stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("No stdout"))?;
 
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
@@ -36,7 +42,10 @@ impl ServerProcess {
     }
 
     /// Send JSON-RPC request and wait for response
-    pub async fn send_and_recv(&self, req: &JsonRpcRequest) -> Result<super::protocol::JsonRpcResponse> {
+    pub async fn send_and_recv(
+        &self,
+        req: &JsonRpcRequest,
+    ) -> Result<super::protocol::JsonRpcResponse> {
         self.send(req).await?;
         self.recv().await
     }

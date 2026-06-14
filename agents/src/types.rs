@@ -18,6 +18,14 @@ pub struct Task {
     pub status: TaskStatus,
     /// When this task was created
     pub created_at: SystemTime,
+    /// API key for the provider used by this subagent
+    pub api_key: String,
+    /// Model name for the provider used by this subagent
+    pub model: String,
+    /// Final output or error from the subagent
+    pub result: Option<String>,
+    /// Number of EventLoop steps completed
+    pub steps: usize,
 }
 
 impl Task {
@@ -29,7 +37,18 @@ impl Task {
             worktree,
             status: TaskStatus::Pending,
             created_at: SystemTime::now(),
+            api_key: String::new(),
+            model: "claude-opus-4-5".to_string(),
+            result: None,
+            steps: 0,
         }
+    }
+
+    /// Set provider credentials for this task
+    pub fn with_provider(mut self, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        self.api_key = api_key.into();
+        self.model = model.into();
+        self
     }
 
     /// Check if task is in a terminal state (Done or Failed)

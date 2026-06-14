@@ -7,4 +7,4 @@ pub mod registry;
 pub mod types;
 
 pub use registry::HookRegistry;
-pub use types::{HookEvent, TaskCreatedEvent, TaskCompletedEvent, PreEditEvent, PostVerifyEvent};
+pub use types::{HookEvent, PostVerifyEvent, PreEditEvent, TaskCompletedEvent, TaskCreatedEvent};

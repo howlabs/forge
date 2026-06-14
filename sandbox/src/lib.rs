@@ -1,7 +1,8 @@
 use anyhow::Result;
+use std::path::Component;
 use std::path::PathBuf;
 use std::process::Command;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Sandbox for safe code execution (v0.100.0: network-off)
 pub struct Sandbox {
@@ -46,20 +47,43 @@ impl Sandbox {
 
     /// Read a file
     pub async fn read_file(&self, path: &str) -> Result<String> {
+        self.validate_relative_path(path)?;
         let full_path = self.project_path.join(path);
         debug!("Reading file: {}", full_path.display());
-        std::fs::read_to_string(full_path)
+
+        let canonical = full_path
+            .canonicalize()
+            .map_err(|_| anyhow::anyhow!("File not found: {}", path))?;
+        let project_path = self.project_path.canonicalize()?;
+        if !canonical.starts_with(&project_path) {
+            return Err(anyhow::anyhow!("Path traversal not allowed: {}", path));
+        }
+
+        std::fs::read_to_string(canonical)
             .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", path, e))
     }
 
     /// Write a file
     pub async fn write_file(&self, path: &str, content: &str) -> Result<()> {
+        self.validate_relative_path(path)?;
         let full_path = self.project_path.join(path);
         debug!("Writing file: {}", full_path.display());
 
-        // Create parent directories if needed
+        // Canonicalize parent to catch symlink-based escapes
+        let project_canonical = self
+            .project_path
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Cannot canonicalize project path: {}", e))?;
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent)?;
+            if let Ok(parent_canonical) = parent.canonicalize() {
+                if !parent_canonical.starts_with(&project_canonical) {
+                    return Err(anyhow::anyhow!(
+                        "Path traversal not allowed: {}",
+                        path
+                    ));
+                }
+            }
         }
 
         std::fs::write(&full_path, content)
@@ -71,15 +95,25 @@ impl Sandbox {
         debug!("Running command: {}", command);
 
         let output = if self.network_mode == "off" {
-            // Network-off mode: restrict network access
-            Command::new("unshare")
-                .arg("-n")
-                .arg("-r")
+            let result = Command::new("unshare")
+                .arg("--net")
                 .arg("sh")
                 .arg("-c")
                 .arg(command)
                 .current_dir(&self.project_path)
-                .output()?
+                .output();
+
+            match result {
+                Ok(output) => output,
+                Err(_) => {
+                    warn!("unshare not available, running without network isolation");
+                    Command::new("sh")
+                        .arg("-c")
+                        .arg(command)
+                        .current_dir(&self.project_path)
+                        .output()?
+                }
+            }
         } else {
             // Normal mode: allow network
             Command::new("sh")
@@ -104,30 +138,43 @@ impl Sandbox {
 
     /// Apply a diff edit to a file
     pub async fn diff_edit(&self, path: &str, old_text: &str, new_text: &str) -> Result<()> {
+        self.validate_relative_path(path)?;
         let full_path = self.project_path.join(path);
         debug!("Applying diff edit to: {}", full_path.display());
 
-        let content = std::fs::read_to_string(&full_path)?;
+        let canonical = full_path
+            .canonicalize()
+            .map_err(|_| anyhow::anyhow!("File not found: {}", path))?;
+        let project_canonical = self.project_path.canonicalize()?;
+        if !canonical.starts_with(&project_canonical) {
+            return Err(anyhow::anyhow!("Path traversal not allowed: {}", path));
+        }
+
+        let content = std::fs::read_to_string(&canonical)?;
         let new_content = content.replacen(old_text, new_text, 1);
 
         if new_content == content {
-            return Err(anyhow::anyhow!(
-                "Old text not found in file: {}",
-                path
-            ));
+            return Err(anyhow::anyhow!("Old text not found in file: {}", path));
         }
 
-        std::fs::write(&full_path, new_content)
+        std::fs::write(&canonical, new_content)
             .map_err(|e| anyhow::anyhow!("Failed to write edited file {}: {}", path, e))
     }
 
-    /// Create a test sandbox
-    #[cfg(test)]
-    pub fn test() -> Self {
-        Self {
-            project_path: PathBuf::from("/tmp/forge-test"),
-            network_mode: "off".to_string(),
+    fn validate_relative_path(&self, path: &str) -> Result<()> {
+        let path = std::path::Path::new(path);
+        if path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err(anyhow::anyhow!(
+                "Path traversal not allowed: {}",
+                path.display()
+            ));
         }
+        Ok(())
     }
 }
 
@@ -142,9 +189,67 @@ mod tests {
         assert_eq!(sandbox.network_mode, "off");
     }
 
-    #[test]
-    fn test_sandbox_test() {
-        let sandbox = Sandbox::test();
-        assert_eq!(sandbox.project_path, PathBuf::from("/tmp/forge-test"));
+    #[tokio::test]
+    async fn test_path_traversal_blocked() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+
+        let result = sandbox.read_file("../etc/passwd").await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Path traversal not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_path_within_sandbox_allowed() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("allowed.txt"), "ok").unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+
+        let content = sandbox.read_file("allowed.txt").await.unwrap();
+
+        assert_eq!(content, "ok");
+    }
+
+    #[tokio::test]
+    async fn test_diff_edit_blocks_absolute_path_escape() {
+        let project = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "before").unwrap();
+        let sandbox = Sandbox::new(project.path(), "on").unwrap();
+
+        let result = sandbox
+            .diff_edit(outside.path().to_str().unwrap(), "before", "after")
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(outside.path()).unwrap(), "before");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_write_file_blocks_symlink_escape() {
+        let project = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("link")).unwrap();
+        let sandbox = Sandbox::new(project.path(), "on").unwrap();
+
+        let result = sandbox.write_file("link/escaped.txt", "escaped").await;
+
+        assert!(result.is_err());
+        assert!(!outside.path().join("escaped.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_diff_edit_blocks_relative_path_escape() {
+        let project = tempfile::TempDir::new().unwrap();
+        let sandbox = Sandbox::new(project.path(), "on").unwrap();
+
+        let result = sandbox.diff_edit("../../etc/passwd", "old", "new").await;
+
+        assert!(result.is_err());
     }
 }

@@ -21,7 +21,11 @@ pub fn provider_span(provider: &str, model: &str) -> Span {
 
 /// Create span for hook execution
 pub fn hook_span(hook_type: &str, script_path: &str) -> Span {
-    info_span!("hook_execution", hook_type = hook_type, script = script_path)
+    info_span!(
+        "hook_execution",
+        hook_type = hook_type,
+        script = script_path
+    )
 }
 
 /// Create span for MCP operation

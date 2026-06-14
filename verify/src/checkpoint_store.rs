@@ -2,10 +2,10 @@
 //!
 //! File-based checkpoint storage for crash recovery
 
-use async_trait::async_trait;
 use agents::traits::CheckpointStore;
 use agents::types::Checkpoint;
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -26,8 +26,7 @@ impl FileCheckpointStore {
     /// Create a new file-based checkpoint store
     pub fn new(store_path: impl Into<PathBuf>) -> Result<Self> {
         let store_path = store_path.into();
-        fs::create_dir_all(&store_path)
-            .context("Failed to create checkpoint store directory")?;
+        fs::create_dir_all(&store_path).context("Failed to create checkpoint store directory")?;
 
         Ok(Self {
             store_path,
@@ -44,11 +43,10 @@ impl FileCheckpointStore {
             return Ok(None);
         }
 
-        let data = fs::read(&path)
-            .context("Failed to read checkpoint file")?;
+        let data = fs::read(&path).context("Failed to read checkpoint file")?;
 
-        let checkpoint: Checkpoint = serde_json::from_slice(&data)
-            .context("Failed to deserialize checkpoint")?;
+        let checkpoint: Checkpoint =
+            serde_json::from_slice(&data).context("Failed to deserialize checkpoint")?;
 
         Ok(Some(checkpoint))
     }
@@ -66,12 +64,11 @@ impl FileCheckpointStore {
             return Ok(None);
         }
 
-        let data = fs::read(&path)
-            .context("Failed to read checkpoint file")?;
+        let data = fs::read(&path).context("Failed to read checkpoint file")?;
 
         // For MVP, store as JSON (bincode in production)
-        let checkpoint: Checkpoint = serde_json::from_slice(&data)
-            .context("Failed to deserialize checkpoint")?;
+        let checkpoint: Checkpoint =
+            serde_json::from_slice(&data).context("Failed to deserialize checkpoint")?;
 
         Ok(Some(checkpoint))
     }
@@ -81,11 +78,10 @@ impl FileCheckpointStore {
         let path = self.checkpoint_path(&checkpoint.task_id);
 
         // For MVP, store as JSON (bincode in production)
-        let data = serde_json::to_vec_pretty(checkpoint)
-            .context("Failed to serialize checkpoint")?;
+        let data =
+            serde_json::to_vec_pretty(checkpoint).context("Failed to serialize checkpoint")?;
 
-        fs::write(&path, data)
-            .context("Failed to write checkpoint file")?;
+        fs::write(&path, data).context("Failed to write checkpoint file")?;
 
         Ok(())
     }
@@ -94,7 +90,10 @@ impl FileCheckpointStore {
 #[async_trait]
 impl CheckpointStore for FileCheckpointStore {
     async fn save(&self, checkpoint: &Checkpoint) -> Result<()> {
-        info!("Saving checkpoint for task {} at step {}", checkpoint.task_id, checkpoint.step);
+        info!(
+            "Saving checkpoint for task {} at step {}",
+            checkpoint.task_id, checkpoint.step
+        );
 
         // Save to file
         self.save_to_file(checkpoint)?;
@@ -135,8 +134,8 @@ impl CheckpointStore for FileCheckpointStore {
 
         let mut task_ids = Vec::new();
 
-        let entries = fs::read_dir(&self.store_path)
-            .context("Failed to read checkpoint store directory")?;
+        let entries =
+            fs::read_dir(&self.store_path).context("Failed to read checkpoint store directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -164,8 +163,7 @@ impl CheckpointStore for FileCheckpointStore {
         // Remove file
         let path = self.checkpoint_path(task_id);
         if path.exists() {
-            fs::remove_file(&path)
-                .context("Failed to remove checkpoint file")?;
+            fs::remove_file(&path).context("Failed to remove checkpoint file")?;
         }
 
         debug!("Checkpoint deleted successfully");

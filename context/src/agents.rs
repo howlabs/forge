@@ -30,7 +30,10 @@ impl AgentsFile {
 
         let (scope, content) = if parts.len() >= 3 {
             let frontmatter: AgentsFrontmatter = serde_yaml::from_str(parts[1])?;
-            (frontmatter.scope.unwrap_or("global".to_string()), parts[2].to_string())
+            (
+                frontmatter.scope.unwrap_or("global".to_string()),
+                parts[2].to_string(),
+            )
         } else {
             ("global".to_string(), content.to_string())
         };
@@ -46,6 +49,23 @@ impl AgentsFile {
 /// Layered AGENTS.md discovery (nearest file wins)
 pub struct AgentsDiscovery {
     root_path: PathBuf,
+}
+
+/// Load AGENTS.md by walking up from `start_dir` to filesystem root.
+/// Returns content of the nearest AGENTS.md found, or None.
+pub fn load_agents_md(start_dir: &Path) -> Option<String> {
+    let mut current = start_dir.to_path_buf();
+    loop {
+        let candidate = current.join("AGENTS.md");
+        if candidate.exists() {
+            return std::fs::read_to_string(&candidate).ok();
+        }
+
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return None,
+        }
+    }
 }
 
 impl AgentsDiscovery {
@@ -148,7 +168,8 @@ scope: global
 ---
 
 Global agents"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Subdir AGENTS.md
         std::fs::write(
@@ -158,7 +179,8 @@ scope: local
 ---
 
 Local agents"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let discovery = AgentsDiscovery::new(root.to_path_buf());
         let result = discovery.discover_from(&subdir).unwrap();
@@ -177,10 +199,7 @@ Local agents"#,
         std::fs::create_dir_all(&subdir).unwrap();
 
         // Only root AGENTS.md
-        std::fs::write(
-            root.join("AGENTS.md"),
-            "Root agents",
-        ).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Root agents").unwrap();
 
         let discovery = AgentsDiscovery::new(root.to_path_buf());
         let result = discovery.get_nearest(&subdir).unwrap();
@@ -200,10 +219,7 @@ Local agents"#,
         assert!(!discovery.has_agents_file(root));
 
         // Add AGENTS.md
-        std::fs::write(
-            root.join("AGENTS.md"),
-            "Test agents",
-        ).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Test agents").unwrap();
 
         assert!(discovery.has_agents_file(root));
     }
@@ -219,5 +235,27 @@ Local agents"#,
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_agents_md_discovery_walks_up() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let nested = root.join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "Parent instructions").unwrap();
+
+        let content = load_agents_md(&nested).unwrap();
+
+        assert_eq!(content, "Parent instructions");
+    }
+
+    #[test]
+    fn test_agents_md_not_found_returns_none() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let content = load_agents_md(temp_dir.path());
+
+        assert!(content.is_none());
     }
 }

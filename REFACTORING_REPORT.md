@@ -107,7 +107,7 @@ forge_ext::      → ext::
 ## Testing Results
 
 ✅ Build: `cargo build --release` - Success (1 warning, unchanged)
-✅ Binary: `forge --version` - Working (v0.98.0)
+✅ Binary: `forge --version` - Working (v0.100.0)
 ✅ REPL mode: Provider selection working
 ✅ Exec mode: Test task execution successful
 ✅ All providers: Z.AI (GLM 5.1) and alternatives functional

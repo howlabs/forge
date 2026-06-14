@@ -2,13 +2,14 @@
 //!
 //! Provides ModelProvider trait implementation for local models via Ollama or llama.cpp.
 
-use super::types::{ChatResponse, Message, MessageRole};
 use super::traits::ModelProvider;
+use super::types::{ChatResponse, Message, MessageRole, ToolCall};
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 
 /// Local model provider (Ollama, llama.cpp)
 pub struct LocalProvider {
@@ -31,6 +32,19 @@ struct OllamaResponse {
 #[derive(Debug, Deserialize)]
 struct OllamaMessage {
     content: String,
+    #[serde(default)]
+    tool_calls: Vec<OllamaToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaToolCall {
+    function: OllamaFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaFunction {
+    name: String,
+    arguments: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +90,29 @@ impl LocalProvider {
             })
             .collect()
     }
+
+    fn parse_ollama_response(response: &str) -> Result<ChatResponse> {
+        let ollama_response: OllamaResponse = serde_json::from_str(response)?;
+        Ok(Self::chat_response_from_ollama(ollama_response))
+    }
+
+    fn chat_response_from_ollama(ollama_response: OllamaResponse) -> ChatResponse {
+        let tool_calls = ollama_response
+            .message
+            .tool_calls
+            .into_iter()
+            .map(|tc| ToolCall {
+                id: tc.function.name.clone(),
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+            })
+            .collect();
+
+        ChatResponse {
+            content: ollama_response.message.content,
+            tool_calls,
+        }
+    }
 }
 
 #[async_trait]
@@ -110,11 +147,8 @@ impl ModelProvider for LocalProvider {
 
         match self.backend {
             LocalBackend::Ollama { .. } => {
-                let ollama_response: OllamaResponse = response.json().await?;
-                Ok(ChatResponse {
-                    content: ollama_response.message.content,
-                    tool_calls: vec![],
-                })
+                let response_text = response.text().await?;
+                Self::parse_ollama_response(&response_text)
             }
             LocalBackend::LlamaCpp { .. } => {
                 let llama_response: LlamaCppResponse = response.json().await?;
@@ -149,12 +183,10 @@ mod tests {
 
     #[test]
     fn test_convert_messages() {
-        let messages = vec![
-            Message {
-                role: MessageRole::User,
-                content: "Hello".to_string(),
-            },
-        ];
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "Hello".to_string(),
+        }];
 
         let converted = LocalProvider::convert_messages(&messages);
         assert_eq!(converted.len(), 1);
@@ -173,5 +205,42 @@ mod tests {
 
         assert!(matches!(ollama, LocalBackend::Ollama { .. }));
         assert!(matches!(llamacpp, LocalBackend::LlamaCpp { .. }));
+    }
+
+    #[test]
+    fn test_parse_ollama_response_with_tool_calls() {
+        let json = r#"{
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "function": {
+                        "name": "run_command",
+                        "arguments": {"command": "cargo test"}
+                    }
+                }]
+            }
+        }"#;
+
+        let response = LocalProvider::parse_ollama_response(json).unwrap();
+
+        assert_eq!(response.content, "");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "run_command");
+        assert_eq!(response.tool_calls[0].name, "run_command");
+        assert_eq!(response.tool_calls[0].arguments["command"], "cargo test");
+    }
+
+    #[test]
+    fn test_parse_ollama_response_without_tool_calls() {
+        let json = r#"{
+            "message": {
+                "content": "Hello from Ollama"
+            }
+        }"#;
+
+        let response = LocalProvider::parse_ollama_response(json).unwrap();
+
+        assert_eq!(response.content, "Hello from Ollama");
+        assert!(response.tool_calls.is_empty());
     }
 }

@@ -3,7 +3,7 @@
 //! Provides functionality to connect to MCP servers, list their tools,
 //! and call those tools from within the agent loop.
 
-use super::protocol::{JsonRpcRequest, McpTool};
+use super::protocol::{JsonRpcRequest, JsonRpcResponse, McpTool};
 use super::server_process::ServerProcess;
 use anyhow::Result;
 
@@ -15,19 +15,8 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// Create new stdio-based MCP client (spawn subprocess)
-    pub async fn new_stdio(command: String, args: Vec<String>) -> Result<Self> {
-        let process = ServerProcess::spawn(command, args).await?;
-        Ok(Self {
-            process,
-            initialized: false,
-            _capabilities: None,
-        })
-    }
-
-    /// Initialize MCP session (send initialize request)
-    pub async fn initialize(&mut self) -> Result<()> {
-        let init_req = JsonRpcRequest {
+    fn initialize_request() -> JsonRpcRequest {
+        JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: serde_json::json!(1),
             method: "initialize".to_string(),
@@ -41,7 +30,33 @@ impl McpClient {
                     "version": "0.190.0"
                 }
             })),
-        };
+        }
+    }
+
+    fn parse_tools_response(resp: JsonRpcResponse) -> Result<Vec<McpTool>> {
+        let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
+        let tools: Vec<McpTool> = serde_json::from_value(
+            result
+                .get("tools")
+                .ok_or_else(|| anyhow::anyhow!("No tools"))?
+                .clone(),
+        )?;
+        Ok(tools)
+    }
+
+    /// Create new stdio-based MCP client (spawn subprocess)
+    pub async fn new_stdio(command: String, args: Vec<String>) -> Result<Self> {
+        let process = ServerProcess::spawn(command, args).await?;
+        Ok(Self {
+            process,
+            initialized: false,
+            _capabilities: None,
+        })
+    }
+
+    /// Initialize MCP session (send initialize request)
+    pub async fn initialize(&mut self) -> Result<()> {
+        let init_req = Self::initialize_request();
 
         let _response = self.process.send_and_recv(&init_req).await?;
         self.initialized = true;
@@ -68,17 +83,15 @@ impl McpClient {
         };
 
         let resp = self.process.send_and_recv(&req).await?;
-        let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
-
-        let tools: Vec<McpTool> = serde_json::from_value(
-            result.get("tools").ok_or_else(|| anyhow::anyhow!("No tools"))?.clone()
-        )?;
-
-        Ok(tools)
+        Self::parse_tools_response(resp)
     }
 
     /// Call a tool on the MCP server
-    pub async fn call_tool(&mut self, name: String, arguments: serde_json::Value) -> Result<serde_json::Value> {
+    pub async fn call_tool(
+        &mut self,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: serde_json::json!(3),
@@ -90,7 +103,8 @@ impl McpClient {
         };
 
         let resp = self.process.send_and_recv(&req).await?;
-        resp.result.ok_or_else(|| anyhow::anyhow!("Tool call failed"))
+        resp.result
+            .ok_or_else(|| anyhow::anyhow!("Tool call failed"))
     }
 
     /// Check if client is initialized
@@ -108,18 +122,43 @@ impl McpClient {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_mcp_client_type_exists() {
-        // Just verify the type exists
-        // Empty test for now
-        // TODO: Add actual MCP client tests
+    #[test]
+    fn test_initialize_request_format() {
+        let req = McpClient::initialize_request();
+        let json = serde_json::to_value(req).unwrap();
+
+        assert_eq!(json["jsonrpc"], "2.0");
+        assert_eq!(json["id"], serde_json::json!(1));
+        assert_eq!(json["method"], "initialize");
+        assert_eq!(json["params"]["clientInfo"]["name"], "forge");
+        assert_eq!(
+            json["params"]["capabilities"]["tools"],
+            serde_json::json!({})
+        );
     }
 
-    #[tokio::test]
-    async fn test_mcp_client_creation() {
-        // Test client creation (may fail without real MCP server)
-        let result = McpClient::new_stdio("echo".to_string(), vec![]).await;
-        // We don't assert success since echo isn't a real MCP server
-        let _ = result;
+    #[test]
+    fn test_list_tools_parses_response() {
+        let resp: JsonRpcResponse = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {
+                        "name": "search_docs",
+                        "description": "Search docs",
+                        "input_schema": {"type": "object"}
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let tools = McpClient::parse_tools_response(resp).unwrap();
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "search_docs");
+        assert_eq!(tools[0].description, "Search docs");
+        assert_eq!(tools[0].input_schema, serde_json::json!({"type": "object"}));
     }
 }

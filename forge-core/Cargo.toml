@@ -7,6 +7,7 @@ edition.workspace = true
 provider = { path = "../provider" }
 context = { path = "../context" }
 sandbox = { path = "../sandbox" }
+forge-ext = { package = "ext", path = "../ext" }
 
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -16,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 notify = "6.1"
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"

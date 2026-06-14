@@ -25,31 +25,25 @@ impl MetricsCollector {
 
     /// Record token usage for a provider
     pub fn record_tokens(&mut self, provider: &str, input: u64, output: u64) {
-        let usage = self.token_usage
-            .entry(provider.to_string())
-            .or_default();
+        let usage = self.token_usage.entry(provider.to_string()).or_default();
         usage.input_tokens += input;
         usage.output_tokens += output;
     }
 
     /// Get token usage for a provider
     pub fn get_usage(&self, provider: &str) -> TokenUsage {
-        self.token_usage
-            .get(provider)
-            .cloned()
-            .unwrap_or_default()
+        self.token_usage.get(provider).cloned().unwrap_or_default()
     }
 
     /// Get total usage across all providers
     pub fn get_total_usage(&self) -> TokenUsage {
-        self.token_usage.values().fold(
-            TokenUsage::default(),
-            |mut acc, usage| {
+        self.token_usage
+            .values()
+            .fold(TokenUsage::default(), |mut acc, usage| {
                 acc.input_tokens += usage.input_tokens;
                 acc.output_tokens += usage.output_tokens;
                 acc
-            },
-        )
+            })
     }
 
     /// Get all providers that have been tracked

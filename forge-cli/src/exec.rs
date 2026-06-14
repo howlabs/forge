@@ -7,6 +7,7 @@ use std::time::Instant;
 
 /// Configuration for headless exec mode
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ExecConfig {
     pub task: String,
     pub verify: bool,
@@ -51,14 +52,44 @@ impl ExecResult {
 
 /// Run Forge in headless exec mode
 pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
-    let start = Instant::now();
+    use context::ContextEngine;
+    use forge_core::EventLoop;
+    use provider::anthropic::AnthropicProvider;
+    use sandbox::Sandbox;
+    use verify::BuildVerifier;
 
-    // For v0.190.0, simulate execution
-    // Real implementation would use Orchestrator and Verifier
+    let start = Instant::now();
     let task_id = uuid::Uuid::new_v4().to_string();
 
-    // Simulate work
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
+    let provider = AnthropicProvider::new(&api_key, "claude-opus-4-5")?;
+
+    let workdir = std::env::current_dir()?;
+    let context = ContextEngine::new(&workdir)?;
+    let sandbox = Sandbox::new(&workdir, "on")?;
+
+    let mut event_loop = EventLoop::new(provider, context, sandbox, config.task.clone());
+
+    let (steps, verify_passed) = if config.verify {
+        let verifier = BuildVerifier::new();
+        match event_loop.run_with_verify(&verifier, &workdir, 5).await {
+            Ok(steps) => (steps, true),
+            Err(e) => {
+                return Ok(ExecResult {
+                    success: false,
+                    task_id,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    steps_completed: 0,
+                    verify_passed: false,
+                    error_message: Some(e.to_string()),
+                });
+            }
+        }
+    } else {
+        let steps = event_loop.run().await?;
+        (steps, false)
+    };
 
     let duration = start.elapsed().as_millis() as u64;
 
@@ -66,8 +97,8 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
         success: true,
         task_id,
         duration_ms: duration,
-        steps_completed: 1,
-        verify_passed: config.verify, // Mock: always pass if verify enabled
+        steps_completed: steps,
+        verify_passed,
         error_message: None,
     })
 }
@@ -145,6 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_exec() {
+        std::env::remove_var("ANTHROPIC_API_KEY");
         let config = ExecConfig {
             task: "Test task".to_string(),
             verify: true,
@@ -152,9 +184,11 @@ mod tests {
             trace: false,
         };
 
-        let result = run_exec(config).await.unwrap();
-        assert!(result.success);
-        assert_eq!(result.steps_completed, 1);
-        assert!(result.duration_ms > 0);
+        let result = run_exec(config).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ANTHROPIC_API_KEY not set"));
     }
 }

@@ -1,3 +1,3 @@
 pub mod event_loop;
 
-pub use event_loop::EventLoop;
+pub use event_loop::{EventLoop, Verifier, VerifyReport};

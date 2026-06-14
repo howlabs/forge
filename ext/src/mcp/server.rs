@@ -2,22 +2,15 @@
 //!
 //! Exposes Forge's own tools over MCP protocol so other agents can drive it.
 
-use super::protocol::{JsonRpcRequest, JsonRpcResponse, McpTool};
 use super::handlers::handle_request;
+use super::protocol::{JsonRpcRequest, JsonRpcResponse, McpTool};
 use anyhow::Result;
 use std::collections::HashMap;
 
 /// MCP server - exposes Forge's tools over MCP protocol
+#[derive(Default)]
 pub struct McpServer {
     tools: HashMap<String, McpTool>,
-}
-
-impl Default for McpServer {
-    fn default() -> Self {
-        Self {
-            tools: HashMap::new(),
-        }
-    }
 }
 
 impl McpServer {
@@ -27,7 +20,12 @@ impl McpServer {
     }
 
     /// Register a tool that other agents can call
-    pub fn register_tool(&mut self, name: String, description: String, input_schema: serde_json::Value) {
+    pub fn register_tool(
+        &mut self,
+        name: String,
+        description: String,
+        input_schema: serde_json::Value,
+    ) {
         let tool = McpTool {
             name,
             description,
@@ -73,7 +71,7 @@ mod tests {
         server.register_tool(
             "test_tool".to_string(),
             "A test tool".to_string(),
-            serde_json::json!({"type": "object"})
+            serde_json::json!({"type": "object"}),
         );
         assert_eq!(server.tool_count(), 1);
         assert!(server.get_tool("test_tool").is_some());
@@ -85,12 +83,12 @@ mod tests {
         server.register_tool(
             "tool1".to_string(),
             "Tool 1".to_string(),
-            serde_json::json!({"type": "object"})
+            serde_json::json!({"type": "object"}),
         );
         server.register_tool(
             "tool2".to_string(),
             "Tool 2".to_string(),
-            serde_json::json!({"type": "object"})
+            serde_json::json!({"type": "object"}),
         );
 
         let tools = server.list_tools();
@@ -118,7 +116,7 @@ mod tests {
         server.register_tool(
             "test".to_string(),
             "Test tool".to_string(),
-            serde_json::json!({"type": "object"})
+            serde_json::json!({"type": "object"}),
         );
 
         let request = JsonRpcRequest {
