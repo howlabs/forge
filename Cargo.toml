@@ -1,0 +1,55 @@
+[workspace]
+members = [
+    "agents",
+    "context",
+    "ext",
+    "forge-cli",
+    "forge-core",
+    "forge-tui",
+    "provider",
+    "sandbox",
+    "verify",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.100.0"
+edition = "2021"
+rust-version = "1.70"
+authors = ["Forge Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/forge-org/forge"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+color-eyre = "0.6"
+
+# HTTP client (for AI providers) - use rustls instead of OpenSSL
+reqwest = { version = "0.11", features = ["json", "stream", "rustls-tls"], default-features = false }
+
+# Configuration
+config = "0.14"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Testing
+mockito = "1.2"
+tempfile = "3.8"

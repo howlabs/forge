@@ -1,0 +1,27 @@
+[package]
+name = "forge-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+forge-tui = { path = "../forge-tui" }
+provider = { path = "../provider" }
+context = { path = "../context" }
+sandbox = { path = "../sandbox" }
+verify = { path = "../verify" }
+agents = { path = "../agents" }
+
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1.6", features = ["v4"] }
+atty = "0.2"
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"

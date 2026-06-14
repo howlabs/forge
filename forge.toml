@@ -1,0 +1,39 @@
+# Forge Configuration File
+
+[provider]
+# Default provider: Z.AI with GLM 5.1
+type = "zai"
+model = "glm-5.1"
+api_key_env = "ZAI_API_KEY"
+
+# Alternative providers:
+# type = "anthropic"
+# model = "claude-sonnet-4-20250514"
+# api_key_env = "FORGE_API_KEY"
+#
+# type = "openai"
+# model = "gpt-4"
+# api_key_env = "OPENAI_API_KEY"
+#
+# type = "gemini"
+# model = "gemini-pro"
+# api_key_env = "GEMINI_API_KEY"
+
+[sandbox]
+# Network mode: off, restricted, full
+network = "off"
+# Working directory
+project_path = "."
+
+[context]
+# v0.100.0: AGENTS.md only (will add tree-sitter + vector store in v0.130.0)
+agents_file = "AGENTS.md"
+
+[verify]
+# Mandatory verify loop - always run before reporting done
+enabled = true
+# Run cargo test and cargo build
+commands = ["cargo test", "cargo build"]
+
+[logging]
+level = "info"

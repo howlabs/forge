@@ -1,0 +1,23 @@
+[package]
+name = "forge-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+provider = { path = "../provider" }
+context = { path = "../context" }
+sandbox = { path = "../sandbox" }
+forge-ext = { package = "ext", path = "../ext" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+notify = "6.1"
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"
