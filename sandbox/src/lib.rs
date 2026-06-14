@@ -92,8 +92,8 @@ impl Sandbox {
                 .output();
 
             match result {
-                Ok(output) if output.status.success() => output,
-                Ok(_) | Err(_) => {
+                Ok(output) => output,
+                Err(_) => {
                     warn!("unshare not available, running without network isolation");
                     Command::new("sh")
                         .arg("-c")
