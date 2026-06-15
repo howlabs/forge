@@ -9,7 +9,7 @@ pub mod orchestrator;
 pub mod traits;
 pub mod types;
 
-// Re-export core types and traits for convenience
+pub use orchestrator::MultiAgentOrchestrator;
 pub use traits::{CheckpointStore, Orchestrator, Verifier};
 pub use types::{Checkpoint, Task, TaskStatus, VerifyReport};
 

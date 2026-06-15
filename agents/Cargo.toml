@@ -11,6 +11,7 @@ tracing = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = { workspace = true }
 forge-core = { path = "../forge-core" }
 provider = { path = "../provider" }
 context = { path = "../context" }

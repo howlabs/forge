@@ -33,6 +33,7 @@ use anyhow::Result;
 
 use crate::graph::{EdgeKind, KnowledgeGraph};
 use crate::lang::LanguageRegistry;
+use crate::retrieval::{self, RetrievalConfig};
 use crate::symbols::parse_symbols;
 use crate::vector::{Chunk, Embedder, VectorStore};
 
@@ -40,17 +41,34 @@ use crate::vector::{Chunk, Embedder, VectorStore};
 // Public types
 // =============================================================================
 
+/// Debug-level breakdown of how the final score was computed.
+#[derive(Debug, Clone)]
+pub struct RetrievalScores {
+    /// Raw cosine similarity from the vector store.
+    pub vector: f32,
+    /// BM25 keyword score.
+    pub bm25: f32,
+    /// Graph-structural proximity boost.
+    pub graph_boost: f32,
+    /// Lexical token-overlap score.
+    pub lexical: f32,
+    /// Weighted final score used for ranking.
+    pub final_score: f32,
+}
+
 /// A chunk retrieved by [`ContextEngine::retrieve`] with its score and
 /// related symbol names.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RetrievedContext {
     /// The matching code chunk.
     pub chunk: Chunk,
-    /// Cosine similarity score (1.0 = identical).
+    /// Final ranking score (backward-compat alias for `scores.final_score`).
     pub score: f32,
     /// Names of symbols related to this chunk (callers/callees, types,
     /// containing modules, etc.), deduplicated and sorted.
     pub related_symbols: Vec<String>,
+    /// Detailed score breakdown for debugging / observability.
+    pub scores: RetrievalScores,
 }
 
 // =============================================================================
@@ -138,34 +156,125 @@ impl ContextEngine {
 
     /// Retrieve the top-`k` chunks most relevant to `query`.
     ///
-    /// 1. Embeds `query` via the stored [`Embedder`].
-    /// 2. Searches the [`VectorStore`] with cosine similarity.
-    /// 3. For each result chunk, resolves symbol names that overlap with
-    ///    the chunk's file range, then walks the [`KnowledgeGraph`] for
-    ///    their neighbours (Calls, References, Contains, Implements).
-    ///
-    /// Results are returned sorted by score descending (ties broken by id).
+    /// Delegates to [`retrieve_hybrid`](Self::retrieve_hybrid) with
+    /// default config.  Use `retrieve_hybrid` directly for tuning.
     pub fn retrieve(&self, query: &str, k: usize) -> Result<Vec<RetrievedContext>> {
+        self.retrieve_hybrid(
+            query,
+            &RetrievalConfig {
+                top_k: k,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Hybrid retrieval: fuses vector similarity, BM25 keyword scoring,
+    /// graph-structural boosting, and lexical reranking.
+    ///
+    /// Pipeline:
+    /// 1. Embed query → vector top `candidate_k`
+    /// 2. BM25 score all chunks → top `candidate_k`
+    /// 3. RRF merge both ranked lists
+    /// 4. Graph boost for chunks near query-matched symbols
+    /// 5. Lexical rerank top `top_k * 2`, trim to `top_k`
+    pub fn retrieve_hybrid(
+        &self,
+        query: &str,
+        config: &RetrievalConfig,
+    ) -> Result<Vec<RetrievedContext>> {
+        let query_terms: Vec<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+
+        // 1. Vector top-candidate_k
         let embeddings = self.embedder.embed(&[query.to_string()])?;
         let query_vec = embeddings
             .first()
             .ok_or_else(|| anyhow::anyhow!("embedder returned no vector for query"))?;
+        let vector_hits = self.vector_store.search(query_vec, config.candidate_k);
 
-        let results = self.vector_store.search(query_vec, k);
-        let mut contexts = Vec::with_capacity(results.len());
+        // 2. BM25 top-candidate_k
+        let all_chunks: Vec<&Chunk> = self.vector_store.all_chunks().collect();
+        let idf = retrieval::compute_idf(&query_terms, &all_chunks);
+        let mut bm25_hits: Vec<(u64, f32)> = all_chunks
+            .iter()
+            .map(|c| (c.id, retrieval::bm25_score(&query_terms, &c.text, &idf)))
+            .collect();
+        bm25_hits.sort_by(|a, b| b.1.total_cmp(&a.1));
+        bm25_hits.truncate(config.candidate_k);
 
-        for (chunk_id, score) in results {
-            if let Some(chunk) = self.vector_store.get(chunk_id) {
-                let related = self.related_symbol_names(chunk_id);
-                contexts.push(RetrievedContext {
-                    chunk: chunk.clone(),
-                    score,
-                    related_symbols: related,
-                });
-            }
+        // 3. RRF merge
+        let mut rrf_scores: HashMap<u64, f32> = HashMap::new();
+        for (rank, (id, _)) in vector_hits.iter().enumerate() {
+            *rrf_scores.entry(*id).or_insert(0.0) +=
+                retrieval::rrf_score(rank, config.rrf_k);
+        }
+        for (rank, (id, _)) in bm25_hits.iter().enumerate() {
+            *rrf_scores.entry(*id).or_insert(0.0) +=
+                retrieval::rrf_score(rank, config.rrf_k);
         }
 
-        Ok(contexts)
+        // 4. Graph boost: match query tokens to symbol names
+        let query_sym_ids: Vec<crate::graph::SymbolId> = query_terms
+            .iter()
+            .flat_map(|t| self.graph.find_by_name(t))
+            .collect();
+
+        // 5. Rerank top-N by lexical score, trim to top_k
+        let mut candidates: Vec<(u64, f32)> = rrf_scores.into_iter().collect();
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+        candidates.truncate(config.top_k * 2);
+
+        let mut results: Vec<RetrievedContext> = candidates
+            .iter()
+            .filter_map(|&(id, rrf)| {
+                let chunk = self.vector_store.get(id)?;
+                let gb = retrieval::graph_boost(
+                    id,
+                    &query_sym_ids,
+                    &self.graph,
+                    &self.chunk_symbols,
+                );
+                let lex = retrieval::lexical_score(&query_terms, &chunk.text);
+                let vs = vector_hits
+                    .iter()
+                    .find(|(i, _)| *i == id)
+                    .map(|(_, s)| *s)
+                    .unwrap_or(0.0);
+                let bs = bm25_hits
+                    .iter()
+                    .find(|(i, _)| *i == id)
+                    .map(|(_, s)| *s)
+                    .unwrap_or(0.0);
+                // ponytail: normalize RRF to [0,1] so all components
+                // contribute proportionally.  Max possible RRF is
+                // 1/(k+1) when rank=0.
+                let max_rrf = retrieval::rrf_score(0, config.rrf_k);
+                let rrf_norm = if max_rrf > 0.0 { rrf / max_rrf } else { 0.0 };
+                let final_score = rrf_norm * 0.5 + gb * 0.3 + lex * 0.2;
+                Some(RetrievedContext {
+                    chunk: chunk.clone(),
+                    score: final_score,
+                    related_symbols: self.related_symbol_names(id),
+                    scores: RetrievalScores {
+                        vector: vs,
+                        bm25: bs,
+                        graph_boost: gb,
+                        lexical: lex,
+                        final_score,
+                    },
+                })
+            })
+            .collect();
+        results.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.chunk.id.cmp(&b.chunk.id))
+        });
+        results.truncate(config.top_k);
+        Ok(results)
     }
 
     /// Statistics: `(file_count, symbol_count, chunk_count)`.

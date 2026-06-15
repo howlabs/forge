@@ -8,6 +8,7 @@ pub mod agents;
 pub mod engine;
 pub mod graph;
 pub mod lang;
+pub mod retrieval;
 pub mod symbols;
 pub mod vector;
 

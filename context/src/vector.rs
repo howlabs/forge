@@ -290,6 +290,16 @@ impl VectorStore {
     pub fn dim(&self) -> usize {
         self.dim
     }
+
+    /// Iterate over all stored chunks.
+    pub fn all_chunks(&self) -> impl Iterator<Item = &Chunk> {
+        self.chunks.values()
+    }
+
+    /// Iterate over all stored chunk ids.
+    pub fn all_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.chunks.keys().copied()
+    }
 }
 
 // =============================================================================

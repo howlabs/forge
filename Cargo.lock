@@ -13,6 +13,7 @@ dependencies = [
  "provider",
  "sandbox",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

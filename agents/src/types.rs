@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// Unit of work for subagents
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     /// Unique task identifier (UUID)
     pub id: String,
@@ -22,10 +22,16 @@ pub struct Task {
     pub api_key: String,
     /// Model name for the provider used by this subagent
     pub model: String,
+    /// Provider name (anthropic, openai, zai, openrouter, ...)
+    pub provider: String,
     /// Final output or error from the subagent
     pub result: Option<String>,
     /// Number of EventLoop steps completed
     pub steps: usize,
+    /// Optional glob patterns limiting which files this agent may touch.
+    /// `None` means unrestricted.  Checked at merge-time only (not
+    /// enforced at write-time — would need sandbox runtime).
+    pub scope: Option<Vec<String>>,
 }
 
 impl Task {
@@ -39,8 +45,10 @@ impl Task {
             created_at: SystemTime::now(),
             api_key: String::new(),
             model: "claude-opus-4-5".to_string(),
+            provider: "anthropic".to_string(),
             result: None,
             steps: 0,
+            scope: None,
         }
     }
 
@@ -48,6 +56,18 @@ impl Task {
     pub fn with_provider(mut self, api_key: impl Into<String>, model: impl Into<String>) -> Self {
         self.api_key = api_key.into();
         self.model = model.into();
+        self
+    }
+
+    /// Set the provider name
+    pub fn with_provider_name(mut self, name: impl Into<String>) -> Self {
+        self.provider = name.into();
+        self
+    }
+
+    /// Set file scope globs
+    pub fn with_scope(mut self, globs: Vec<String>) -> Self {
+        self.scope = Some(globs);
         self
     }
 
@@ -63,7 +83,7 @@ impl Task {
 }
 
 /// Current state of a task
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStatus {
     /// Created but not started
     Pending,
@@ -180,5 +200,26 @@ mod tests {
         assert_eq!(checkpoint.task_id, "task-123");
         assert_eq!(checkpoint.step, 5);
         assert_eq!(checkpoint.state, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_task_scope() {
+        let task = Task::new("Fix bug", PathBuf::from("/tmp"))
+            .with_scope(vec!["src/**".into(), "tests/**".into()]);
+        assert_eq!(task.scope.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_task_serialization_roundtrip() {
+        let task = Task::new("test", PathBuf::from("/tmp"))
+            .with_provider("key", "model")
+            .with_provider_name("openai")
+            .with_scope(vec!["src/**".into()]);
+        let json = serde_json::to_string(&task).unwrap();
+        let loaded: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(task.id, loaded.id);
+        assert_eq!(task.prompt, loaded.prompt);
+        assert_eq!(task.provider, loaded.provider);
+        assert_eq!(task.scope, loaded.scope);
     }
 }

@@ -91,6 +91,9 @@ pub struct KnowledgeGraph {
     #[serde(with = "adj_serde")]
     adj: HashMap<(SymbolId, EdgeKind), BTreeSet<SymbolId>>,
     files: Vec<PathBuf>,
+    // ponytail: qualified name → symbol id. Built additively in add_file().
+    #[serde(default)]
+    qualified_names: HashMap<String, SymbolId>,
 }
 
 mod adj_serde {
@@ -142,11 +145,9 @@ impl KnowledgeGraph {
         Ok(())
     }
 
-    /// Number of symbols currently in the graph.
+    /// Number of live (non-removed) symbols in the graph.
     pub fn symbol_count(&self) -> usize {
-        // Vec is sparse: every `push` lines up with the symbol's
-        // 1-based id, so the count is just the length.
-        self.symbols.len()
+        self.symbols.iter().filter(|s| s.is_some()).count()
     }
 
     /// Look up a symbol by id.
@@ -226,6 +227,13 @@ impl KnowledgeGraph {
         // 3. Contains edges by line-range nesting.
         self.add_contains_edges(&id_for_index);
 
+        // 3.5. Compute qualified names for new symbols.
+        let imports = Self::parse_imports(path, source);
+        for &id in &id_for_index {
+            let qname = self.compute_qname(id);
+            self.qualified_names.insert(qname, id);
+        }
+
         // 4. Calls / References / Implements via tree walk.
         let mut parser = Parser::new();
         parser
@@ -234,7 +242,7 @@ impl KnowledgeGraph {
         let tree = parser
             .parse(source, None)
             .ok_or_else(|| anyhow::anyhow!("tree-sitter failed to parse {}", path.display()))?;
-        self.walk_for_references(language, &tree, source, &id_for_index);
+        self.walk_for_references(language, &tree, source, &id_for_index, &imports);
 
         self.files.push(path.to_path_buf());
         Ok(())
@@ -242,7 +250,6 @@ impl KnowledgeGraph {
 
     /// Remove all symbols and edges associated with a specific file.
     pub fn remove_file(&mut self, path: &Path) {
-        // Find all symbol IDs belonging to this file
         let mut ids_to_remove = Vec::new();
         for (i, sym_opt) in self.symbols.iter().enumerate() {
             if let Some(sym) = sym_opt {
@@ -253,12 +260,7 @@ impl KnowledgeGraph {
         }
 
         for id in &ids_to_remove {
-            // Remove from by_name
-            let sym_name = if let Some(sym) = self.symbol(*id) {
-                Some(sym.name.clone())
-            } else {
-                None
-            };
+            let sym_name = self.symbol(*id).map(|s| s.name.clone());
             if let Some(name) = sym_name {
                 if let Some(set) = self.by_name.get_mut(&name) {
                     set.remove(id);
@@ -267,21 +269,271 @@ impl KnowledgeGraph {
                     }
                 }
             }
-
-            // Remove all outgoing edges from this id
             self.adj.retain(|(from, _), _| from != id);
-
-            // Remove this id from all incoming edges
             for set in self.adj.values_mut() {
                 set.remove(id);
             }
-
-            // Finally, nullify the symbol
             self.symbols[id.0 as usize - 1] = None;
         }
 
-        // Remove from tracked files
+        // ponytail: clean qualified names for removed symbols
+        ids_to_remove.iter().for_each(|id| {
+            self.qualified_names.retain(|_, &mut sid| sid != *id);
+        });
+
         self.files.retain(|p| p != path);
+    }
+
+    // =========================================================================
+    // Qualified names + import resolution (§4)
+    // =========================================================================
+
+    /// Find the immediate parent of `id` via the tightest Contains edge.
+    fn find_parent(&self, id: SymbolId) -> Option<SymbolId> {
+        let _sym = self.symbol(id)?;
+        let mut best: Option<(SymbolId, usize)> = None;
+
+        for (from, kind) in self.adj.keys() {
+            if *kind != EdgeKind::Contains {
+                continue;
+            }
+            if let Some(children) = self.adj.get(&(*from, EdgeKind::Contains)) {
+                if !children.contains(&id) {
+                    continue;
+                }
+                if let Some(parent_sym) = self.symbol(*from) {
+                    let span = parent_sym.end_line - parent_sym.start_line;
+                    match best {
+                        None => best = Some((*from, span)),
+                        Some((_, best_span)) if span < best_span => {
+                            best = Some((*from, span))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// Compute the qualified name for a symbol by walking up the
+    /// containment chain.  Format: `file_stem::parent::...::name`.
+    fn compute_qname(&self, id: SymbolId) -> String {
+        let mut parts = Vec::new();
+        let mut current = Some(id);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(cid) = current {
+            if !visited.insert(cid) {
+                break; // cycle guard
+            }
+            if let Some(s) = self.symbol(cid) {
+                parts.push(s.name.clone());
+            }
+            current = self.find_parent(cid);
+        }
+        parts.reverse();
+
+        if let Some(sym) = self.symbol(id) {
+            let stem = sym
+                .file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
+            parts.insert(0, stem.to_string());
+        }
+        parts.join("::")
+    }
+
+    /// Resolve a symbol by qualified name.
+    pub fn resolve_qualified(&self, qname: &str) -> Option<SymbolId> {
+        self.qualified_names.get(qname).copied()
+    }
+
+    /// Look up the qualified name for a given symbol id.
+    pub fn resolve_qualified_by_id(&self, id: SymbolId) -> Option<String> {
+        self.qualified_names
+            .iter()
+            .find(|(_, &sid)| sid == id)
+            .map(|(qname, _)| qname.clone())
+    }
+
+    /// All symbols that call the target identified by `qname`.
+    pub fn callers_of(&self, qname: &str) -> Vec<SymbolId> {
+        let Some(target) = self.qualified_names.get(qname) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for ((from, kind), targets) in &self.adj {
+            if *kind == EdgeKind::Calls && targets.contains(target) {
+                out.push(*from);
+            }
+        }
+        out
+    }
+
+    /// All symbols called by the symbol identified by `qname`.
+    pub fn callees_of(&self, qname: &str) -> Vec<SymbolId> {
+        let Some(&id) = self.qualified_names.get(qname) else {
+            return Vec::new();
+        };
+        self.neighbors(id, EdgeKind::Calls)
+    }
+
+    /// All symbols that reference the target identified by `qname`
+    /// (including Calls, which are a superset of References).
+    pub fn references_to(&self, qname: &str) -> Vec<SymbolId> {
+        let Some(target) = self.qualified_names.get(qname) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for ((from, kind), targets) in &self.adj {
+            if (*kind == EdgeKind::References || *kind == EdgeKind::Calls)
+                && targets.contains(target)
+            {
+                out.push(*from);
+            }
+        }
+        out
+    }
+
+    // =========================================================================
+    // Import parsing (best-effort, §4)
+    // =========================================================================
+
+    /// Best-effort extraction of `use`/`import`/`from...import` statements.
+    /// Returns a map `local_name → imported_qualified_path`.
+    fn parse_imports(path: &Path, source: &str) -> HashMap<String, String> {
+        let mut imports = HashMap::new();
+        let lang = match Lang::for_path(path) {
+            Some(l) => l,
+            None => return imports,
+        };
+        match lang {
+            Lang::Rust => {
+                for line in source.lines() {
+                    let line = line.trim();
+                    if !line.starts_with("use ") || !line.ends_with(';') {
+                        continue;
+                    }
+                    let p = &line[4..line.len() - 1];
+                    let segments: Vec<&str> = p.split("::").collect();
+                    if let Some(last) = segments.last() {
+                        if matches!(*last, "self" | "super" | "crate") {
+                            continue;
+                        }
+                        imports.insert(last.to_string(), p.to_string());
+                    }
+                }
+            }
+            Lang::Python => {
+                for line in source.lines() {
+                    let line = line.trim();
+                    if line.starts_with("import ") {
+                        let module = &line[7..];
+                        if let Some(name) = module.split('.').next() {
+                            let name = name.split_whitespace().next().unwrap_or(name);
+                            imports.insert(name.to_string(), module.to_string());
+                        }
+                    } else if let Some(rest) = line.strip_prefix("from ") {
+                        if let Some(pos) = rest.find(" import ") {
+                            let module = rest[..pos].trim();
+                            let names_part = &rest[pos + 8..];
+                            for name in names_part.split(',') {
+                                let name = name
+                                    .trim()
+                                    .split(" as ")
+                                    .next()
+                                    .unwrap_or("")
+                                    .trim();
+                                if !name.is_empty() && name != "*" {
+                                    imports.insert(name.to_string(), module.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+                for line in source.lines() {
+                    let line = line.trim();
+                    if !line.starts_with("import ") || !line.contains(" from ") {
+                        continue;
+                    }
+                    if let Some(from_pos) = line.find(" from ") {
+                        let module = line[from_pos + 6..]
+                            .trim()
+                            .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+                            .trim_end_matches(';')
+                            .trim();
+                        let names_part = &line[7..from_pos];
+                        if names_part.starts_with('{') {
+                            for name in
+                                names_part.trim_matches(|c| c == '{' || c == '}').split(',')
+                            {
+                                let name = name
+                                    .trim()
+                                    .split(" as ")
+                                    .next()
+                                    .unwrap_or("")
+                                    .trim();
+                                if !name.is_empty() {
+                                    imports.insert(name.to_string(), module.to_string());
+                                }
+                            }
+                        } else if !names_part.is_empty() {
+                            let name = names_part
+                                .trim()
+                                .split(" as ")
+                                .next()
+                                .unwrap_or("")
+                                .trim();
+                            if !name.is_empty() {
+                                imports.insert(name.to_string(), module.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Lang::Go => {
+                for line in source.lines() {
+                    let line = line.trim();
+                    if !line.starts_with("import ") {
+                        continue;
+                    }
+                    let rest = &line[7..];
+                    if rest.starts_with('"') {
+                        let module =
+                            rest.trim_matches(|c| c == '"' || c == '\'');
+                        let name =
+                            module.rsplit('/').next().unwrap_or(module);
+                        imports.insert(name.to_string(), module.to_string());
+                    } else if let Some(space_pos) = rest.find(' ') {
+                        let alias = &rest[..space_pos];
+                        let module = rest[space_pos + 1..]
+                            .trim()
+                            .trim_matches(|c| c == '"' || c == '\'');
+                        imports.insert(alias.to_string(), module.to_string());
+                    }
+                }
+            }
+            Lang::Java => {
+                for line in source.lines() {
+                    let line = line.trim();
+                    if !line.starts_with("import ") || !line.ends_with(';') {
+                        continue;
+                    }
+                    let p = &line[7..line.len() - 1];
+                    if let Some(name) = p.rsplit('.').next() {
+                        imports.insert(name.to_string(), p.to_string());
+                    }
+                }
+            }
+            Lang::Cpp => {
+                // C++ includes/using-declarations are not reliable import
+                // indicators — skip for now.
+            }
+        }
+        imports
     }
 
     // -------------------------------------------------------------------------
@@ -337,12 +589,16 @@ impl KnowledgeGraph {
     /// Walk the syntax tree to find identifiers and turn them into
     /// `Calls` / `References` edges.  Also detects `impl` blocks and
     /// creates `Implements` edges to the target type/trait.
+    ///
+    /// When an identifier matches an import alias, resolution is tried
+    /// against the qualified-name index first (import-aware resolution).
     fn walk_for_references(
         &mut self,
         language: Lang,
         tree: &tree_sitter::Tree,
         source: &str,
         ids: &[SymbolId],
+        imports: &HashMap<String, String>,
     ) {
         // Index by line for cheap "is this identifier inside this
         // symbol" lookups.
@@ -431,28 +687,46 @@ impl KnowledgeGraph {
 
         // Resolve each identifier to a "containing symbol" and link
         // to the matching definition(s) by name.
+        //
+        // ponytail: import resolution is best-effort.  If the
+        // identifier matches an import alias, the qualified-name
+        // index is tried first.  On miss we fall back to plain
+        // name-based lookup so callers in the same file still work.
         for (line, name, is_call) in refs {
             if name.is_empty() {
                 continue;
             }
-            // Skip self-references to the function/struct name that
-            // defines the current scope: the parser already accounts
-            // for those, and double-counting them pollutes the
-            // "incoming edges" view.
             let candidates = match by_line.get(&line) {
                 Some(c) => c.clone(),
                 None => continue,
             };
 
+            // --- import-aware fast path ---
+            if let Some(import_path) = imports.get(&name) {
+                if let Some(&target_id) = self.qualified_names.get(import_path) {
+                    for owner in &candidates {
+                        if *owner == target_id {
+                            continue;
+                        }
+                        let kind = if is_call && function_ids.contains(owner) {
+                            EdgeKind::Calls
+                        } else {
+                            EdgeKind::References
+                        };
+                        self.link(*owner, kind, target_id);
+                    }
+                    continue;
+                }
+            }
+
+            // --- fall back to name-based lookup ---
             let mut targets = self.find_by_name(&name);
             if targets.is_empty() {
                 continue;
             }
 
-            // Qualified resolution / Simple scoping (Ponytail approach):
-            // If any target is in the SAME file as the owner, it's almost certainly
-            // the intended target (shadowing global symbols of the same name).
-            // Filter the targets to only local ones if any exist.
+            // Same-file scoping: if any target is in the same file as
+            // the owner, prefer it (shadowing globals of the same name).
             for owner in &candidates {
                 if let Some(owner_sym) = self.symbol(*owner) {
                     let owner_file = owner_sym.file.clone();
@@ -470,7 +744,6 @@ impl KnowledgeGraph {
 
             for owner in candidates {
                 if targets.contains(&owner) {
-                    // Don't link a symbol to itself.
                     continue;
                 }
                 let kind = if is_call && function_ids.contains(&owner) {
@@ -551,7 +824,18 @@ impl KnowledgeGraph {
             Lang::Go | Lang::Java | Lang::Cpp => {
                 if kind == "call_expression" || kind == "method_invocation" {
                     if let Some(func) = node.child_by_field_name("function").or_else(|| node.child_by_field_name("name")) {
-                        Self::push_identifier_from(func, source, line, out, true);
+                        // ponytail: handle selector/field exprs the same way JS handles member_expression
+                        if func.kind() == "selector_expression" || func.kind() == "field_expression" {
+                            if let Some(field) = func.child_by_field_name("field") {
+                                Self::push_identifier_from(field, source, line, out, true);
+                            }
+                        } else {
+                            Self::push_identifier_from(func, source, line, out, true);
+                        }
+                    }
+                } else if kind == "selector_expression" || kind == "field_expression" {
+                    if let Some(field) = node.child_by_field_name("field") {
+                        Self::push_identifier_from(field, source, line, out, false);
                     }
                 } else if kind == "identifier" {
                     Self::push_identifier_from(node, source, line, out, false);
@@ -874,5 +1158,266 @@ mod tests {
                 g.symbol_count()
             );
         }
+    }
+
+    // ---- qualified names (§4) -------------------------------------------
+
+    #[test]
+    fn qualified_name_includes_module_path() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "mod api {\n    fn new() {}\n}\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let new_id = *g.find_by_name("new").first().unwrap();
+        let qname = g.resolve_qualified_by_id(new_id).unwrap();
+        assert!(
+            qname.contains("api") && qname.contains("new"),
+            "qualified name should include module path, got {qname}"
+        );
+    }
+
+    #[test]
+    fn two_same_named_methods_get_distinct_qnames() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "mod a {\n    fn new() {}\n}\nmod b {\n    fn new() {}\n}\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let ids = g.find_by_name("new");
+        assert_eq!(ids.len(), 2, "expected two new() symbols");
+        let q1 = g.resolve_qualified_by_id(ids[0]).unwrap();
+        let q2 = g.resolve_qualified_by_id(ids[1]).unwrap();
+        assert_ne!(q1, q2, "two new() in different modules must have distinct qnames");
+    }
+
+    #[test]
+    fn resolve_qualified_finds_symbol() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "fn greet() {}\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let greet_id = *g.find_by_name("greet").first().unwrap();
+        let qname = g.resolve_qualified_by_id(greet_id).unwrap();
+        assert_eq!(g.resolve_qualified(&qname), Some(greet_id));
+        assert_eq!(g.resolve_qualified("nonexistent::nope"), None);
+    }
+
+    // ---- import resolution (§4) -----------------------------------------
+
+    #[test]
+    fn rust_use_import_resolves_to_qualified_symbol() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("helper.rs"),
+            "pub fn debug() {}\n",
+            &registry(),
+        )
+        .unwrap();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "use helper::debug;\nfn foo() {\n    debug();\n}\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let foo_id = *g.find_by_name("foo").first().unwrap();
+        let calls = g.neighbors(foo_id, EdgeKind::Calls);
+        assert!(
+            !calls.is_empty(),
+            "foo should call debug via import resolution"
+        );
+        let callee_name = g.symbol(calls[0]).map(|s| s.name.as_str());
+        assert_eq!(callee_name, Some("debug"));
+    }
+
+    #[test]
+    fn python_from_import_resolves() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("math_utils.py"),
+            "def add(a, b):\n    return a + b\n",
+            &registry(),
+        )
+        .unwrap();
+        g.add_file(
+            &PathBuf::from("app.py"),
+            "from math_utils import add\ndef run():\n    add(1, 2)\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let run_id = *g.find_by_name("run").first().unwrap();
+        let calls = g.neighbors(run_id, EdgeKind::Calls);
+        assert!(
+            !calls.is_empty(),
+            "run should call add via from-import"
+        );
+    }
+
+    #[test]
+    fn js_default_import_resolves() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("utils.js"),
+            "export function helper() {}\n",
+            &registry(),
+        )
+        .unwrap();
+        g.add_file(
+            &PathBuf::from("app.js"),
+            "import helper from './utils';\nfunction main() {\n    helper();\n}\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let main_id = *g.find_by_name("main").first().unwrap();
+        let calls = g.neighbors(main_id, EdgeKind::Calls);
+        assert!(
+            !calls.is_empty(),
+            "main should call helper via default import"
+        );
+    }
+
+    #[test]
+    fn go_import_resolves() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("fmt.go"),
+            "package fmt\nfunc Debug(v interface{}) {}\n",
+            &registry(),
+        )
+        .unwrap();
+        g.add_file(
+            &PathBuf::from("main.go"),
+            "package main\nimport \"fmt\"\nfunc main() {\n    fmt.Debug(nil)\n}\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let main_id = *g.find_by_name("main").first().unwrap();
+        let calls = g.neighbors(main_id, EdgeKind::Calls);
+        assert!(
+            !calls.is_empty(),
+            "main should call Debug via Go import"
+        );
+    }
+
+    // ---- query API (§4) -------------------------------------------------
+
+    #[test]
+    fn callers_of_returns_correct_symbols() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "fn callee() {}\nfn a() { callee(); }\nfn b() { callee(); }\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let callee_id = *g.find_by_name("callee").first().unwrap();
+        let qname = g.resolve_qualified_by_id(callee_id).unwrap();
+        let callers = g.callers_of(&qname);
+        assert_eq!(callers.len(), 2, "two functions call callee");
+        let names: Vec<_> = callers
+            .iter()
+            .filter_map(|id| g.symbol(*id).map(|s| s.name.clone()))
+            .collect();
+        assert!(names.contains(&"a".to_string()));
+        assert!(names.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn callees_of_returns_correct_symbols() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "fn x() {}\nfn y() {}\nfn caller() { x(); y(); }\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let caller_id = *g.find_by_name("caller").first().unwrap();
+        let qname = g.resolve_qualified_by_id(caller_id).unwrap();
+        let callees = g.callees_of(&qname);
+        assert_eq!(callees.len(), 2, "caller calls two functions");
+        let names: Vec<_> = callees
+            .iter()
+            .filter_map(|id| g.symbol(*id).map(|s| s.name.clone()))
+            .collect();
+        assert!(names.contains(&"x".to_string()));
+        assert!(names.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn references_to_includes_callers() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "fn target() {}\nfn caller() { target(); }\nfn user() { target(); }\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let target_id = *g.find_by_name("target").first().unwrap();
+        let qname = g.resolve_qualified_by_id(target_id).unwrap();
+        let refs = g.references_to(&qname);
+        assert_eq!(refs.len(), 2, "two symbols reference target");
+    }
+
+    #[test]
+    fn query_on_nonexistent_qname_returns_empty() {
+        let g = KnowledgeGraph::new();
+        assert!(g.callers_of("no::such::thing").is_empty());
+        assert!(g.callees_of("no::such::thing").is_empty());
+        assert!(g.references_to("no::such::thing").is_empty());
+    }
+
+    #[test]
+    fn qualified_names_persist_through_save_load() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("lib.rs"),
+            "mod inner {\n    fn helper() {}\n}\n",
+            &registry(),
+        )
+        .unwrap();
+
+        let helper_id = *g.find_by_name("helper").first().unwrap();
+        let qname = g.resolve_qualified_by_id(helper_id).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.json");
+        g.save(&path).unwrap();
+        let loaded = KnowledgeGraph::load(&path).unwrap();
+
+        assert_eq!(loaded.resolve_qualified(&qname), Some(helper_id));
+    }
+
+    #[test]
+    fn remove_file_cleans_qualified_names() {
+        let mut g = KnowledgeGraph::new();
+        g.add_file(
+            &PathBuf::from("a.rs"),
+            "fn alpha() {}\n",
+            &registry(),
+        )
+        .unwrap();
+        let alpha_id = *g.find_by_name("alpha").first().unwrap();
+        let qname = g.resolve_qualified_by_id(alpha_id).unwrap();
+        assert!(g.resolve_qualified(&qname).is_some());
+
+        g.remove_file(&PathBuf::from("a.rs"));
+        assert!(g.resolve_qualified(&qname).is_none());
     }
 }

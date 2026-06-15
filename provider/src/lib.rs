@@ -10,6 +10,8 @@ pub use openai::OpenAIProvider;
 pub use traits::ModelProvider;
 pub use types::{ChatResponse, Message, ToolCall, ToolResponse};
 
+use std::sync::Arc;
+
 /// Provider registry entry for OpenAI-compatible providers
 pub struct ProviderEntry {
     pub name: &'static str,
@@ -60,12 +62,22 @@ pub fn create_openai_compatible(
     OpenAIProvider::with_base_url(model, api_key, entry.base_url)
 }
 
-/// ZAI uses an OpenAI-compatible chat completions API.
-#[deprecated(note = "Use find_provider(\"zai\") instead")]
-pub fn zai_provider(model: impl Into<String>, api_key: impl Into<String>) -> OpenAIProvider {
-    OpenAIProvider::with_base_url(
-        model,
-        api_key,
-        "https://api.z.ai/api/paas/v4/chat/completions",
-    )
+/// Create a provider by name. Handles Anthropic, Gemini, and
+/// all OpenAI-compatible providers registered in `PROVIDERS`.
+pub fn create_provider(
+    name: &str,
+    model: &str,
+    api_key: &str,
+) -> anyhow::Result<Arc<dyn ModelProvider>> {
+    match name.to_lowercase().as_str() {
+        "anthropic" => Ok(Arc::new(AnthropicProvider::new(api_key, model)?)),
+        "gemini" => Ok(Arc::new(GeminiProvider::new(model, api_key))),
+        _ => {
+            if let Some(entry) = find_provider(name) {
+                Ok(Arc::new(create_openai_compatible(entry, model, api_key)))
+            } else {
+                anyhow::bail!("Unknown provider: {}", name)
+            }
+        }
+    }
 }

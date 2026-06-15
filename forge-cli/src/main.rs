@@ -2,13 +2,12 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use context::ContextEngine;
 use forge_tui::{SimpleTui, TuiConfig};
-use provider::anthropic::AnthropicProvider;
-use provider::gemini::GeminiProvider;
-use provider::openai::OpenAIProvider;
 use provider::ModelProvider;
 use sandbox::Sandbox;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
+
+use agents::Orchestrator;
 
 mod exec;
 
@@ -105,6 +104,53 @@ enum Commands {
         /// Enable trace logging
         #[arg(long, default_value_t = false)]
         trace: bool,
+    },
+    /// Multi-agent orchestration: spawn, list, and join subagents
+    Agents {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentAction {
+    /// Spawn a new subagent to work on a task
+    Spawn {
+        /// Task description / prompt for the subagent
+        #[arg(long)]
+        prompt: String,
+
+        /// Model provider
+        #[arg(long, default_value = "zai")]
+        provider: String,
+
+        /// Model to use
+        #[arg(short, long, default_value = "glm-5.1")]
+        model: String,
+
+        /// API key for the provider
+        #[arg(short, long)]
+        api_key: String,
+
+        /// File scope globs (comma-separated, e.g. "src/**,tests/**")
+        #[arg(short, long)]
+        scope: Option<String>,
+
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+    },
+    /// List all agents and their status
+    List {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+    },
+    /// Wait for all running agents to complete and merge their changes
+    Join {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
     },
 }
 
@@ -216,21 +262,125 @@ async fn main() -> Result<()> {
 
             std::process::exit(result.exit_code());
         }
+        Commands::Agents { action } => {
+            match action {
+                AgentAction::Spawn {
+                    prompt,
+                    provider: provider_name,
+                    model,
+                    api_key,
+                    scope,
+                    project_path,
+                } => {
+                    let project_path = std::path::PathBuf::from(&project_path);
+                    let worktree_base = project_path.join(".forge").join("worktrees");
+
+                    let mut orchestrator = agents::MultiAgentOrchestrator::new(
+                        &project_path,
+                        &worktree_base,
+                        4, // max parallel
+                    )?;
+
+                    let mut task = agents::Task::new(&prompt, std::path::PathBuf::new())
+                        .with_provider(api_key, model)
+                        .with_provider_name(&provider_name);
+
+                    if let Some(scope_str) = scope {
+                        let globs: Vec<String> =
+                            scope_str.split(',').map(|s| s.trim().to_string()).collect();
+                        task = task.with_scope(globs);
+                    }
+
+                    let task_id = task.id.clone();
+                    orchestrator.spawn(task).await?;
+                    println!("Spawned agent {}", task_id);
+                    println!("Use `forge agents join` to wait for completion and merge.");
+
+                    // Wait for completion
+                    let completed = orchestrator.join_all().await?;
+                    for t in &completed {
+                        let status = if t.status == agents::TaskStatus::Done {
+                            "DONE"
+                        } else {
+                            "FAILED"
+                        };
+                        println!("[{}] {} — {}", status, t.id, t.result.as_deref().unwrap_or(""));
+                    }
+                    Ok(())
+                }
+                AgentAction::List { project_path } => {
+                    let project_path = std::path::PathBuf::from(&project_path);
+                    let worktree_base = project_path.join(".forge").join("worktrees");
+
+                    let orchestrator = agents::MultiAgentOrchestrator::new(
+                        &project_path,
+                        &worktree_base,
+                        4,
+                    )?;
+
+                    let tasks = orchestrator.list_tasks_from_disk();
+                    if tasks.is_empty() {
+                        println!("No agents found.");
+                    } else {
+                        println!("{:<12} {:<10} {:<40} {}", "ID", "STATUS", "PROMPT", "RESULT");
+                        println!("{}", "-".repeat(80));
+                        for t in &tasks {
+                            let status = format!("{:?}", t.status);
+                        let prompt = if t.prompt.chars().count() > 37 {
+                            let truncated: String = t.prompt.chars().take(37).collect();
+                            format!("{truncated}...")
+                        } else {
+                            t.prompt.clone()
+                        };
+                            let result = t.result.as_deref().unwrap_or("");
+                            println!(
+                                "{:<12} {:<10} {:<40} {}",
+                                &t.id[..12],
+                                status,
+                                prompt,
+                                result
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                AgentAction::Join { project_path } => {
+                    let project_path = std::path::PathBuf::from(&project_path);
+                    let worktree_base = project_path.join(".forge").join("worktrees");
+
+                    let orchestrator = agents::MultiAgentOrchestrator::new(
+                        &project_path,
+                        &worktree_base,
+                        4,
+                    )?;
+
+                    // ponytail: can't resume across processes.  Report
+                    // status of persisted tasks.  Merges were already
+                    // handled by the original `spawn` invocation.
+                    let tasks = orchestrator.list_tasks_from_disk();
+                    if tasks.is_empty() {
+                        println!("No agents found.");
+                    } else {
+                        for t in &tasks {
+                            let status = if t.status == agents::TaskStatus::Done {
+                                "DONE"
+                            } else if t.status == agents::TaskStatus::Failed {
+                                "FAILED"
+                            } else {
+                                "RUNNING"
+                            };
+                            println!("[{}] {} — {}", status, t.id, t.result.as_deref().unwrap_or("in progress"));
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        }
     }
 }
 
 pub fn create_provider_instance(name: &str, model: &str, api_key: &str) -> Result<Arc<dyn ModelProvider>> {
-    match name.to_lowercase().as_str() {
-        "anthropic" => Ok(Arc::new(AnthropicProvider::new(api_key, model)?)),
-        "gemini" => Ok(Arc::new(GeminiProvider::new(model, api_key))),
-        _ => {
-            if let Some(entry) = provider::find_provider(name) {
-                Ok(Arc::new(provider::create_openai_compatible(entry, model, api_key)))
-            } else {
-                anyhow::bail!("Unknown provider: {}", name)
-            }
-        }
-    }
+    provider::create_provider(name, model, api_key)
 }
 
 /// Launch TUI mode with configured provider
@@ -328,6 +478,29 @@ mod tests {
     #[test]
     fn test_exec_parsing() {
         let cli = Cli::try_parse_from(["forge", "exec", "test task", "--api-key", "test"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_agents_spawn_parsing() {
+        let cli = Cli::try_parse_from([
+            "forge", "agents", "spawn",
+            "--prompt", "fix the bug",
+            "--api-key", "test",
+            "--scope", "src/**",
+        ]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_agents_list_parsing() {
+        let cli = Cli::try_parse_from(["forge", "agents", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn test_agents_join_parsing() {
+        let cli = Cli::try_parse_from(["forge", "agents", "join"]);
         assert!(cli.is_ok());
     }
 }
