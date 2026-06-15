@@ -106,6 +106,24 @@ Forge follows Semantic Versioning (`MAJOR.MINOR.PATCH`) with explicit `v`-prefix
 - Document every release in `CHANGELOG.md`; breaking changes before `v1.0.0` must still be called out explicitly.
 - Keep all workspace crates on the same Forge version unless a crate is intentionally split into an independently released package.
 
+
+## P0 Hardening
+
+Forge now includes the first production-hardening layer for daily CLI use:
+
+- `forge exec` uses the requested `--provider`, `--model`, `--api-key`, `--project-path`, and `--config` values instead of falling back to a hard-coded provider.
+- Verification can be configured in `forge.toml` with explicit commands, or auto-detected for Rust, Node, Python, Go, and Make-based projects.
+- The command sandbox rejects obvious destructive commands and network tools when network mode is `off`.
+
+Example `forge.toml`:
+
+```toml
+[verify]
+commands = ["cargo build --quiet", "cargo test --quiet"]
+auto_detect = true
+max_retries = 5
+```
+
 ## Building
 
 ```bash

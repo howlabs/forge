@@ -2,17 +2,49 @@
 //!
 //! Provides non-interactive execution with machine-readable output.
 
+use anyhow::{Context, Result};
+use provider::{AnthropicProvider, GeminiProvider, LocalProvider, ModelProvider, OpenAIProvider};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
+use verify::BuildVerifier;
 
 /// Configuration for headless exec mode
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ExecConfig {
     pub task: String,
+    pub project_path: PathBuf,
+    pub config_path: PathBuf,
+    pub api_key: String,
+    pub provider: String,
+    pub model: String,
     pub verify: bool,
     pub output_format: String, // "json" | "text"
     pub trace: bool,
+}
+
+/// Optional forge.toml shape consumed by exec mode.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ForgeToml {
+    verify: Option<VerifyToml>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct VerifyToml {
+    /// Explicit verify commands. When present, these override auto-detection.
+    commands: Option<Vec<String>>,
+    /// Enable language/project auto-detection when commands are not provided.
+    #[serde(default = "default_true")]
+    auto_detect: bool,
+    /// Maximum verification repair attempts for the agent loop.
+    max_retries: Option<usize>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Result of exec run (machine-readable)
@@ -50,40 +82,98 @@ impl ExecResult {
     }
 }
 
+struct CommandVerifier {
+    commands: Vec<String>,
+}
+
+impl CommandVerifier {
+    fn new(commands: Vec<String>) -> Self {
+        Self { commands }
+    }
+}
+
+#[async_trait::async_trait]
+impl forge_core::Verifier for CommandVerifier {
+    async fn verify(&self, workdir: &Path) -> Result<forge_core::VerifyReport> {
+        let start = Instant::now();
+        let mut logs = String::new();
+        for command in &self.commands {
+            logs.push_str(&format!("$ {command}\n"));
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(workdir)
+                .output()
+                .with_context(|| format!("failed to run verify command `{command}`"))?;
+            logs.push_str(&String::from_utf8_lossy(&output.stdout));
+            logs.push_str(&String::from_utf8_lossy(&output.stderr));
+            if !output.status.success() {
+                return Ok(forge_core::VerifyReport {
+                    passed: false,
+                    logs,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+        }
+
+        Ok(forge_core::VerifyReport {
+            passed: true,
+            logs,
+            duration_ms: start.elapsed().as_millis() as u64,
+        })
+    }
+
+    async fn quick_check(&self, _workdir: &Path) -> Result<bool> {
+        Ok(!self.commands.is_empty())
+    }
+}
+
 /// Run Forge in headless exec mode
 pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
     use context::ContextEngine;
     use forge_core::EventLoop;
-    use provider::anthropic::AnthropicProvider;
     use sandbox::Sandbox;
-    use verify::BuildVerifier;
 
     let start = Instant::now();
     let task_id = uuid::Uuid::new_v4().to_string();
+    let workdir = config.project_path.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize project path {}",
+            config.project_path.display()
+        )
+    })?;
 
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
-    let provider = AnthropicProvider::new(&api_key, "claude-opus-4-5")?;
+    let provider = create_provider(&config.provider, &config.model, &config.api_key)?;
+    let forge_toml = load_forge_toml(&config.config_path)?;
+    let verify_commands = resolve_verify_commands(&workdir, forge_toml.as_ref());
+    let max_retries = forge_toml
+        .as_ref()
+        .and_then(|toml| toml.verify.as_ref())
+        .and_then(|verify| verify.max_retries)
+        .unwrap_or(5);
 
-    let workdir = std::env::current_dir()?;
     let context = ContextEngine::new(&workdir)?;
-    let sandbox = Sandbox::new(&workdir, "on")?;
-
+    let sandbox = Sandbox::new(&workdir, "off")?;
     let mut event_loop = EventLoop::new(provider, context, sandbox, config.task.clone());
 
     let (steps, verify_passed) = if config.verify {
-        let verifier = BuildVerifier::new();
-        match event_loop.run_with_verify(&verifier, &workdir, 5).await {
-            Ok(steps) => (steps, true),
-            Err(e) => {
-                return Ok(ExecResult {
-                    success: false,
-                    task_id,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    steps_completed: 0,
-                    verify_passed: false,
-                    error_message: Some(e.to_string()),
-                });
+        if let Some(commands) = verify_commands {
+            let verifier = CommandVerifier::new(commands);
+            match event_loop
+                .run_with_verify(&verifier, &workdir, max_retries)
+                .await
+            {
+                Ok(steps) => (steps, true),
+                Err(e) => return failed_result(task_id, start, e),
+            }
+        } else {
+            let verifier = BuildVerifier::new();
+            match event_loop
+                .run_with_verify(&verifier, &workdir, max_retries)
+                .await
+            {
+                Ok(steps) => (steps, true),
+                Err(e) => return failed_result(task_id, start, e),
             }
         }
     } else {
@@ -91,26 +181,122 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
         (steps, false)
     };
 
-    let duration = start.elapsed().as_millis() as u64;
-
     Ok(ExecResult {
         success: true,
         task_id,
-        duration_ms: duration,
+        duration_ms: start.elapsed().as_millis() as u64,
         steps_completed: steps,
         verify_passed,
         error_message: None,
     })
 }
 
+fn failed_result(
+    task_id: String,
+    start: Instant,
+    error: anyhow::Error,
+) -> anyhow::Result<ExecResult> {
+    Ok(ExecResult {
+        success: false,
+        task_id,
+        duration_ms: start.elapsed().as_millis() as u64,
+        steps_completed: 0,
+        verify_passed: false,
+        error_message: Some(error.to_string()),
+    })
+}
+
+fn create_provider(provider: &str, model: &str, api_key: &str) -> Result<Arc<dyn ModelProvider>> {
+    match provider.to_lowercase().as_str() {
+        "anthropic" => Ok(Arc::new(AnthropicProvider::new(api_key, model)?)),
+        "openai" => Ok(Arc::new(OpenAIProvider::new(model, api_key))),
+        "zai" | "z.ai" | "glm" => Ok(Arc::new(OpenAIProvider::with_base_url(
+            model,
+            api_key,
+            "https://api.z.ai/api/paas/v4/chat/completions",
+        ))),
+        "gemini" => Ok(Arc::new(GeminiProvider::new(model, api_key))),
+        "local" => Ok(Arc::new(LocalProvider::new_ollama(
+            "http://localhost:11434",
+            model,
+        ))),
+        other => anyhow::bail!("Unknown provider: {other}"),
+    }
+}
+
+fn load_forge_toml(path: &Path) -> Result<Option<ForgeToml>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read config {}", path.display()))?;
+    let parsed = toml::from_str(&content)
+        .with_context(|| format!("failed to parse config {}", path.display()))?;
+    Ok(Some(parsed))
+}
+
+fn resolve_verify_commands(workdir: &Path, config: Option<&ForgeToml>) -> Option<Vec<String>> {
+    if let Some(verify) = config.and_then(|toml| toml.verify.as_ref()) {
+        if let Some(commands) = &verify.commands {
+            if !commands.is_empty() {
+                return Some(commands.clone());
+            }
+        }
+        if !verify.auto_detect {
+            return None;
+        }
+    }
+
+    detect_verify_commands(workdir)
+}
+
+fn detect_verify_commands(workdir: &Path) -> Option<Vec<String>> {
+    if workdir.join("Cargo.toml").exists() {
+        return Some(vec![
+            "cargo build --quiet".into(),
+            "cargo test --quiet".into(),
+        ]);
+    }
+    if workdir.join("package.json").exists() {
+        let runner = if workdir.join("pnpm-lock.yaml").exists() {
+            "pnpm"
+        } else if workdir.join("yarn.lock").exists() {
+            "yarn"
+        } else {
+            "npm"
+        };
+        return Some(match runner {
+            "pnpm" => vec!["pnpm test".into(), "pnpm run build".into()],
+            "yarn" => vec!["yarn test".into(), "yarn build".into()],
+            _ => vec!["npm test".into(), "npm run build".into()],
+        });
+    }
+    if workdir.join("pyproject.toml").exists() || workdir.join("pytest.ini").exists() {
+        return Some(vec!["python -m pytest".into()]);
+    }
+    if workdir.join("go.mod").exists() {
+        return Some(vec!["go test ./...".into()]);
+    }
+    if workdir.join("Makefile").exists() {
+        return Some(vec!["make test".into()]);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_exec_config() {
         let config = ExecConfig {
             task: "Fix the bug".to_string(),
+            project_path: PathBuf::from("."),
+            config_path: PathBuf::from("forge.toml"),
+            api_key: "test".to_string(),
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-5".to_string(),
             verify: true,
             output_format: "json".to_string(),
             trace: false,
@@ -130,7 +316,6 @@ mod tests {
             error_message: None,
         };
         let json = result.to_json().unwrap();
-        println!("JSON: {}", json);
         assert!(json.contains("success"));
         assert!(json.contains("test-123"));
     }
@@ -174,21 +359,28 @@ mod tests {
         assert!(text.contains("500ms"));
     }
 
-    #[tokio::test]
-    async fn test_run_exec() {
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        let config = ExecConfig {
-            task: "Test task".to_string(),
-            verify: true,
-            output_format: "json".to_string(),
-            trace: false,
-        };
+    #[test]
+    fn detects_cargo_verifier() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname='x'").unwrap();
+        assert_eq!(
+            detect_verify_commands(dir.path()).unwrap(),
+            vec!["cargo build --quiet", "cargo test --quiet"]
+        );
+    }
 
-        let result = run_exec(config).await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("ANTHROPIC_API_KEY not set"));
+    #[test]
+    fn config_commands_override_auto_detect() {
+        let toml = ForgeToml {
+            verify: Some(VerifyToml {
+                commands: Some(vec!["just verify".into()]),
+                auto_detect: true,
+                max_retries: Some(2),
+            }),
+        };
+        assert_eq!(
+            resolve_verify_commands(Path::new("."), Some(&toml)).unwrap(),
+            vec!["just verify"]
+        );
     }
 }

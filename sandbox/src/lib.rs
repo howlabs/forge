@@ -89,6 +89,7 @@ impl Sandbox {
 
     /// Run a command (network-off if configured)
     pub async fn run_command(&self, command: &str) -> Result<String> {
+        self.validate_command_policy(command)?;
         debug!("Running command: {}", command);
 
         let output = if self.network_mode == "off" {
@@ -156,6 +157,42 @@ impl Sandbox {
 
         std::fs::write(&canonical, new_content)
             .map_err(|e| anyhow::anyhow!("Failed to write edited file {}: {}", path, e))
+    }
+
+    fn validate_command_policy(&self, command: &str) -> Result<()> {
+        let lowered = command.to_ascii_lowercase();
+        let denied_fragments = [
+            "rm -rf /",
+            "rm -rf .",
+            ":(){",
+            "mkfs",
+            "dd if=",
+            "> /dev/sd",
+            "shutdown",
+            "reboot",
+        ];
+
+        if denied_fragments
+            .iter()
+            .any(|fragment| lowered.contains(fragment))
+        {
+            return Err(anyhow::anyhow!(
+                "Command rejected by Forge safety policy: {}",
+                command
+            ));
+        }
+
+        if self.network_mode == "off" {
+            let network_tools = ["curl ", "wget ", "ssh ", "scp ", "nc ", "netcat "];
+            if network_tools.iter().any(|tool| lowered.contains(tool)) {
+                return Err(anyhow::anyhow!(
+                    "Command rejected: network mode is off and command appears to use network access: {}",
+                    command
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn validate_relative_path(&self, path: &str) -> Result<()> {
@@ -247,6 +284,22 @@ mod tests {
 
         let result = sandbox.diff_edit("../../etc/passwd", "old", "new").await;
 
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_command_rejects_obvious_destructive_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new(temp.path(), "off").unwrap();
+        let result = sandbox.run_command("rm -rf /").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_command_rejects_network_tool_when_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = Sandbox::new(temp.path(), "off").unwrap();
+        let result = sandbox.run_command("curl https://example.com").await;
         assert!(result.is_err());
     }
 }
