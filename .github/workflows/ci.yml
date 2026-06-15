@@ -1,0 +1,103 @@
+name: CI
+
+# Forge - Phase 0 CI gate.
+#
+# Runs on a 3-OS matrix (ubuntu, macos, windows-gnu) and enforces:
+#   - cargo fmt --check
+#   - cargo clippy --workspace --all-targets -- -D warnings
+#   - cargo build --workspace --all-targets
+#   - cargo test  --workspace             (default features, fully offline)
+#
+# Why windows-* uses the `gnu` target:
+#   The default Windows `msvc` target requires the Visual Studio C++ Build
+#   Tools (`link.exe`). Building with the GNU target needs only MinGW, which is
+#   preinstalled on GitHub's `windows-latest` runners via the bundled
+#   `x86_64-w64-mingw32` toolchain. This matches the local Windows dev setup
+#   documented in `rust-toolchain.toml`.
+#
+# All test execution here is offline. Tests that require network access or a
+# live LLM/API key are gated behind the `integration` feature and are NOT run
+# in this job (see `cargo test --workspace --features integration` locally).
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  build-and-test:
+    name: build+test (${{ matrix.os }})
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      # On Windows-MSVC runners we must build for the GNU target, whose
+      # linker (gcc/MinGW) is already on PATH on GitHub's windows runners.
+      - name: Set default target (Windows GNU)
+        if: runner.os == 'Windows'
+        run: echo "CARGO_BUILD_TARGET=x86_64-pc-windows-gnu" >> $GITHUB_ENV
+        shell: bash
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo build
+        run: cargo build --workspace --all-targets
+
+      - name: cargo test (offline, default features)
+        run: cargo test --workspace
+        env:
+          # Guarantee tests can neither make nor require real network calls.
+          # (reqwest/other HTTP stacks honour the standard proxy env vars;
+          # an unreachable proxy makes any accidental network call fail fast.)
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: ""
+
+  release-binary:
+    name: release binary (ubuntu)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo build --release
+        run: cargo build --release
+      - name: Verify forge binary produced
+        run: test -f target/release/forge && echo "forge binary OK"

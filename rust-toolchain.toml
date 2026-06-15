@@ -1,0 +1,31 @@
+# Forge toolchain
+#
+# Pinned to a recent stable channel for reproducible builds across all
+# supported platforms (Linux, macOS, Windows).
+#
+# We deliberately do NOT pin a host triple here: CI runs on ubuntu, macOS and
+# Windows, and each platform picks its native default target. On Windows that
+# is normally the `msvc` target.
+#
+# NOTE for Windows developers without Visual Studio C++ Build Tools:
+#   The MSVC target requires `link.exe`, which ships only with the VS C++ Build
+#   Tools. If you do not have them installed, you can build with the GNU target
+#   instead. Two extra steps are required on this machine specifically:
+#
+#     1. Install the GNU toolchain and add the target:
+#          rustup toolchain install stable-x86_64-pc-windows-gnu
+#          rustup target add x86_64-pc-windows-gnu
+#     2. Point CARGO_TARGET_DIR at a directory OUTSIDE the sandboxed Desktop
+#        tree (AppLocker / Application Control blocks freshly-compiled build
+#        scripts executed from under `%USERPROFILE%\Desktop`):
+#          set CARGO_TARGET_DIR=C:\Users\<you>\forge_target
+#
+#   Then prefix cargo invocations with the GNU toolchain, e.g.:
+#          cargo +stable-x86_64-pc-windows-gnu build --workspace
+#
+# See `.github/workflows/ci.yml` for the canonical, known-good invocation.
+
+[toolchain]
+channel = "1.83.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
