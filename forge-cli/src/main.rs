@@ -15,42 +15,7 @@ mod exec;
 
 use exec::{run_exec, ExecConfig};
 
-/// Supported model providers
-#[derive(Debug, Clone, PartialEq)]
-enum ProviderType {
-    Anthropic,
-    OpenAI,
-    Zai,
-    Gemini,
-    Local,
-}
-
-impl std::str::FromStr for ProviderType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "anthropic" => Ok(ProviderType::Anthropic),
-            "openai" => Ok(ProviderType::OpenAI),
-            "zai" | "z.ai" | "glm" => Ok(ProviderType::Zai),
-            "gemini" => Ok(ProviderType::Gemini),
-            "local" => Ok(ProviderType::Local),
-            _ => anyhow::bail!("Unknown provider: {}", s),
-        }
-    }
-}
-
-impl std::fmt::Display for ProviderType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProviderType::Anthropic => write!(f, "anthropic"),
-            ProviderType::OpenAI => write!(f, "openai"),
-            ProviderType::Zai => write!(f, "zai"),
-            ProviderType::Gemini => write!(f, "gemini"),
-            ProviderType::Local => write!(f, "local"),
-        }
-    }
-}
+// ProviderType enum removed in favor of registry
 
 /// Forge - An open-source CLI coding agent
 #[derive(Parser, Debug)]
@@ -85,9 +50,13 @@ enum Commands {
         #[arg(short, long, default_value = "glm-5.1")]
         model: String,
 
-        /// Network access mode (off, restricted, full)
-        #[arg(long, default_value = "off")]
+        /// Network access mode (off, on, auto)
+        #[arg(short, long, default_value = "off")]
         network: String,
+
+        /// Watch project files for changes and incrementally update the semantic index
+        #[arg(short, long)]
+        watch: bool,
 
         /// Resume a task from checkpoint (v0.180.0)
         #[arg(long, value_name = "TASK_ID")]
@@ -156,6 +125,7 @@ async fn main() -> Result<()> {
             provider,
             model,
             network,
+            watch,
             resume,
             tui,
             plain,
@@ -167,14 +137,27 @@ async fn main() -> Result<()> {
                 return resume_task(&task_id, &project_path);
             }
 
-            // Parse provider type
-            let provider_type = provider.parse::<ProviderType>()?;
+            // Provider will be resolved via registry
 
             // Initialize context engine (minimal: AGENTS.md loading)
             let context = ContextEngine::new(project_path.clone())?;
 
             // Initialize sandbox with network-off by default
             let sandbox = Sandbox::new(project_path.clone(), network)?;
+
+            let context = std::sync::Arc::new(tokio::sync::Mutex::new(context));
+            
+            let mut _watcher = None;
+            if watch {
+                let mut w = forge_core::file_watcher::FileWatcher::new(
+                    context.clone() as std::sync::Arc<tokio::sync::Mutex<dyn context::ContextIndex>>,
+                    &project_path,
+                    500, // debounce
+                )?;
+                w.watch()?;
+                _watcher = Some(w);
+                tracing::info!("File watcher started for incremental indexing");
+            }
 
             // Determine mode: TUI, plain, or auto-detect
             let is_tty = atty::is(atty::Stream::Stdout);
@@ -183,7 +166,7 @@ async fn main() -> Result<()> {
             if use_tui {
                 tracing::info!("Launching TUI mode with {} provider", provider);
                 launch_tui_mode(
-                    provider_type,
+                    provider.clone(),
                     model,
                     api_key,
                     context,
@@ -193,7 +176,7 @@ async fn main() -> Result<()> {
                 .await?;
             } else {
                 tracing::info!("Launching plain REPL mode with {} provider", provider);
-                launch_plain_mode(provider_type, model, api_key, context, sandbox).await?;
+                launch_plain_mode(provider.clone(), model, api_key, context, sandbox).await?;
             }
 
             Ok(())
@@ -237,42 +220,31 @@ async fn main() -> Result<()> {
     }
 }
 
+pub fn create_provider_instance(name: &str, model: &str, api_key: &str) -> Result<Arc<dyn ModelProvider>> {
+    match name.to_lowercase().as_str() {
+        "anthropic" => Ok(Arc::new(AnthropicProvider::new(api_key, model)?)),
+        "gemini" => Ok(Arc::new(GeminiProvider::new(model, api_key))),
+        _ => {
+            if let Some(entry) = provider::find_provider(name) {
+                Ok(Arc::new(provider::create_openai_compatible(entry, model, api_key)))
+            } else {
+                anyhow::bail!("Unknown provider: {}", name)
+            }
+        }
+    }
+}
+
 /// Launch TUI mode with configured provider
 async fn launch_tui_mode(
-    provider_type: ProviderType,
+    provider_name: String,
     model: String,
     api_key: String,
-    _context: ContextEngine,
+    _context: std::sync::Arc<tokio::sync::Mutex<context::ContextEngine>>,
     _sandbox: Sandbox,
     project_path: String,
 ) -> Result<()> {
-    // Create provider based on type
-    let provider: Arc<dyn ModelProvider> = match provider_type {
-        ProviderType::Anthropic => {
-            tracing::info!("Creating Anthropic provider with model: {}", model);
-            Arc::new(AnthropicProvider::new(api_key, model)?)
-        }
-        ProviderType::OpenAI => {
-            tracing::info!("Creating OpenAI provider with model: {}", model);
-            Arc::new(OpenAIProvider::new(model, api_key))
-        }
-        ProviderType::Zai => {
-            tracing::info!("Creating Z.AI provider with model: {}", model);
-            Arc::new(OpenAIProvider::with_base_url(
-                model,
-                api_key,
-                "https://api.z.ai/api/coding/paas/v4/chat/completions",
-            ))
-        }
-        ProviderType::Gemini => {
-            tracing::info!("Creating Gemini provider with model: {}", model);
-            Arc::new(GeminiProvider::new(model, api_key))
-        }
-        ProviderType::Local => {
-            tracing::info!("Creating Local provider with model: {}", model);
-            Arc::new(LocalProvider::new_ollama("http://localhost:11434", model))
-        }
-    };
+    // Create provider based on registry
+    let provider = create_provider_instance(&provider_name, &model, &api_key)?;
 
     // Initialize TUI configuration
     let config = TuiConfig {
@@ -281,7 +253,7 @@ async fn launch_tui_mode(
         ..Default::default()
     };
 
-    tracing::info!("Starting TUI with {} provider", provider_type);
+    tracing::info!("Starting TUI with {} provider", provider_name);
     tracing::info!("Project path: {}", project_path);
 
     // Create and run TUI
@@ -293,13 +265,13 @@ async fn launch_tui_mode(
 
 /// Launch plain REPL mode with configured provider
 async fn launch_plain_mode(
-    provider_type: ProviderType,
+    provider_name: String,
     model: String,
     api_key: String,
-    context: ContextEngine,
+    context: std::sync::Arc<tokio::sync::Mutex<context::ContextEngine>>,
     sandbox: Sandbox,
 ) -> Result<()> {
-    let _ = (provider_type, model, api_key, context, sandbox);
+    let _ = (provider_name, model, api_key, context, sandbox);
     println!(
         "Plain REPL mode is not interactive yet. Use --tui for the EventLoop-backed TUI or `forge exec` for headless tasks."
     );

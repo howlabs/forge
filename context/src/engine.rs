@@ -70,7 +70,6 @@ pub struct ContextEngine {
     /// `chunk_id → Vec<symbol_name>` for each symbol whose range overlaps
     /// with the chunk's range.
     chunk_symbols: HashMap<u64, Vec<String>>,
-    next_chunk_id: u64,
 }
 
 // ---- Public API ------------------------------------------------------------
@@ -85,7 +84,7 @@ impl ContextEngine {
     /// * After indexing the store is persisted to `store_dir/vector_store.json`.
     pub fn index_dir(root: &Path, store_dir: &Path, embedder: Arc<dyn Embedder>) -> Result<Self> {
         let dim = embedder.dim();
-        let mut vector_store = VectorStore::open(store_dir, dim)?;
+        let mut vector_store = VectorStore::open(store_dir, dim, embedder.model())?;
         vector_store.clear();
         let graph = KnowledgeGraph::new();
         let registry = LanguageRegistry::new();
@@ -99,7 +98,6 @@ impl ContextEngine {
             file_count: 0,
             symbol_count: 0,
             chunk_symbols: HashMap::new(),
-            next_chunk_id: 1,
         };
 
         engine.index_files(root, &registry)?;
@@ -142,7 +140,37 @@ impl ContextEngine {
 
     /// Statistics: `(file_count, symbol_count, chunk_count)`.
     pub fn stats(&self) -> (usize, usize, usize) {
-        (self.file_count, self.symbol_count, self.vector_store.len())
+        (
+            self.file_count,
+            self.symbol_count,
+            self.vector_store.len(),
+        )
+    }
+}
+
+impl crate::ContextIndex for ContextEngine {
+    fn upsert_file(&mut self, path: &Path, src: &str) {
+        self.remove_file(path);
+        
+        let registry = LanguageRegistry::new();
+        if let Err(e) = self.index_file(path, src, &registry) {
+            tracing::warn!("engine: failed to upsert {}: {:#}", path.display(), e);
+        } else {
+            self.file_count += 1;
+        }
+        let _ = self.vector_store.persist();
+    }
+
+    fn remove_file(&mut self, path: &Path) {
+        self.graph.remove_file(path);
+        self.vector_store.remove_file(path);
+        // ponytail: YAGNI - chunk_symbols might leak slightly for deleted chunks, but harmless for short-lived daemon
+        
+        if self.file_count > 0 {
+            self.file_count -= 1;
+        }
+        self.symbol_count = self.graph.symbol_count();
+        let _ = self.vector_store.persist();
     }
 }
 
@@ -236,7 +264,12 @@ impl ContextEngine {
                 let start_line = i * 40 + 1;
                 let end_line = start_line + window.len() - 1;
                 let text = window.join("\n");
-                let id = self.next_chunk_id();
+                
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&path, &mut hasher);
+                std::hash::Hash::hash(&start_line, &mut hasher);
+                let id = std::hash::Hasher::finish(&hasher);
+                
                 chunks.push(Chunk {
                     id,
                     file: path.to_path_buf(),
@@ -252,7 +285,11 @@ impl ContextEngine {
                 .iter()
                 .map(|sym| {
                     let text = extract_range(source, sym.start_line, sym.end_line);
-                    let id = self.next_chunk_id();
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&path, &mut hasher);
+                    std::hash::Hash::hash(&sym.start_line, &mut hasher);
+                    let id = std::hash::Hasher::finish(&hasher);
+                    
                     Chunk {
                         id,
                         file: path.to_path_buf(),
@@ -265,11 +302,7 @@ impl ContextEngine {
         }
     }
 
-    fn next_chunk_id(&mut self) -> u64 {
-        let id = self.next_chunk_id;
-        self.next_chunk_id += 1;
-        id
-    }
+
 
     /// Collect all symbol names reachable via the knowledge graph from any
     /// symbol whose range overlaps the chunk.
@@ -378,6 +411,10 @@ mod tests {
         fn dim(&self) -> usize {
             self.dim
         }
+
+        fn model(&self) -> &str {
+            "test"
+        }
     }
 
     /// Embedder based on keyword frequency.
@@ -405,6 +442,10 @@ mod tests {
 
         fn dim(&self) -> usize {
             self.vocab.len()
+        }
+
+        fn model(&self) -> &str {
+            "keyword"
         }
     }
 

@@ -32,6 +32,12 @@ pub enum Lang {
     TypeScript,
     /// TSX (TypeScript with JSX) — see `tree-sitter-typescript`.
     Tsx,
+    /// Go — see `tree-sitter-go`.
+    Go,
+    /// Java — see `tree-sitter-java`.
+    Java,
+    /// C++ — see `tree-sitter-cpp`.
+    Cpp,
 }
 
 impl Lang {
@@ -46,7 +52,11 @@ impl Lang {
             "py" | "pyi" => Some(Self::Python),
             "js" | "mjs" | "cjs" => Some(Self::JavaScript),
             "ts" => Some(Self::TypeScript),
+            "ts" => Some(Self::TypeScript),
             "tsx" => Some(Self::Tsx),
+            "go" => Some(Self::Go),
+            "java" => Some(Self::Java),
+            "cpp" | "cxx" | "cc" | "h" | "hpp" | "c" => Some(Self::Cpp),
             _ => None,
         }
     }
@@ -58,7 +68,11 @@ impl Lang {
             Self::Python => tree_sitter_python::language(),
             Self::JavaScript => tree_sitter_javascript::language(),
             Self::TypeScript => tree_sitter_typescript::language_typescript(),
+            Self::TypeScript => tree_sitter_typescript::language_typescript(),
             Self::Tsx => tree_sitter_typescript::language_tsx(),
+            Self::Go => tree_sitter_go::language(),
+            Self::Java => tree_sitter_java::language(),
+            Self::Cpp => tree_sitter_cpp::language(),
         }
     }
 }
@@ -128,5 +142,12 @@ mod tests {
     fn matching_is_case_insensitive() {
         let p = PathBuf::from("FOO.RS");
         assert_eq!(Lang::for_path(&p), Some(Lang::Rust));
+    }
+    #[test]
+    fn new_languages_resolve() {
+        assert_eq!(Lang::for_path(&PathBuf::from("a.go")), Some(Lang::Go));
+        assert_eq!(Lang::for_path(&PathBuf::from("a.java")), Some(Lang::Java));
+        assert_eq!(Lang::for_path(&PathBuf::from("a.cpp")), Some(Lang::Cpp));
+        assert_eq!(Lang::for_path(&PathBuf::from("a.h")), Some(Lang::Cpp));
     }
 }

@@ -39,6 +39,12 @@ pub enum SymbolKind {
     Impl,
     /// Module / namespace / top-level file scope.
     Module,
+    /// Interface declaration (Java, TypeScript, Go).
+    Interface,
+    /// Namespace declaration (C++).
+    Namespace,
+    /// Constant declaration (Go, C++).
+    Const,
 }
 
 impl SymbolKind {
@@ -51,6 +57,9 @@ impl SymbolKind {
             Self::Trait => "trait",
             Self::Impl => "impl",
             Self::Module => "module",
+            Self::Interface => "interface",
+            Self::Namespace => "namespace",
+            Self::Const => "const",
         }
     }
 }
@@ -125,6 +134,11 @@ pub fn parse_symbols(
         // legitimate entries and corrupt the downstream index.
         for capture in m.captures {
             if capture.index == symbol_idx {
+                // Error resilience: skip ERROR nodes generated during partial parses
+                if capture.node.is_error() {
+                    break;
+                }
+                
                 if let Some(sym) = build_symbol(path, source, language, capture.node) {
                     out.push(sym);
                 }
@@ -147,6 +161,9 @@ fn query_for(language: Lang) -> &'static str {
         Lang::Python => include_str!("../queries/python.scm"),
         Lang::JavaScript => include_str!("../queries/javascript.scm"),
         Lang::TypeScript | Lang::Tsx => include_str!("../queries/typescript.scm"),
+        Lang::Go => include_str!("../queries/go.scm"),
+        Lang::Java => include_str!("../queries/java.scm"),
+        Lang::Cpp => include_str!("../queries/cpp.scm"),
     }
 }
 
@@ -208,11 +225,90 @@ fn classify(language: Lang, node: Node, source: &str) -> Option<(SymbolKind, Str
                 Some((SymbolKind::Struct, child_text(node, "name", source)))
             }
             "enum_declaration" => Some((SymbolKind::Enum, child_text(node, "name", source))),
-            "interface_declaration" => Some((SymbolKind::Trait, child_text(node, "name", source))),
-            "module" | "namespace_declaration" => {
-                Some((SymbolKind::Module, child_text(node, "name", source)))
+            "interface_declaration" => Some((SymbolKind::Interface, child_text(node, "name", source))),
+            "module" => Some((SymbolKind::Module, child_text(node, "name", source))),
+            "namespace_declaration" => {
+                Some((SymbolKind::Namespace, child_text(node, "name", source)))
             }
             "program" => Some((SymbolKind::Module, "<program>".to_string())),
+            _ => None,
+        },
+        Lang::Go => match kind {
+            "function_declaration" | "method_declaration" => {
+                Some((SymbolKind::Function, child_text(node, "name", source)))
+            }
+            "type_declaration" => {
+                let spec = node.child_by_field_name("type_spec");
+                if let Some(spec) = spec {
+                    let type_kind = spec.child_by_field_name("type")?.kind();
+                    let name = child_text(spec, "name", source);
+                    match type_kind {
+                        "struct_type" => Some((SymbolKind::Struct, name)),
+                        "interface_type" => Some((SymbolKind::Interface, name)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            "const_declaration" => {
+                // Take the first const spec's name if available, else just the declaration text
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "const_spec" {
+                        let name = child_text(child, "name", source);
+                        if !name.is_empty() {
+                            return Some((SymbolKind::Const, name));
+                        }
+                    }
+                }
+                Some((SymbolKind::Const, "<const>".to_string()))
+            }
+            _ => None,
+        },
+        Lang::Java => match kind {
+            "class_declaration" => Some((SymbolKind::Struct, child_text(node, "name", source))),
+            "interface_declaration" => Some((SymbolKind::Interface, child_text(node, "name", source))),
+            "enum_declaration" => Some((SymbolKind::Enum, child_text(node, "name", source))),
+            "method_declaration" | "constructor_declaration" => {
+                Some((SymbolKind::Function, child_text(node, "name", source)))
+            }
+            _ => None,
+        },
+        Lang::Cpp => match kind {
+            "class_specifier" | "struct_specifier" => {
+                Some((SymbolKind::Struct, child_text(node, "name", source)))
+            }
+            "enum_specifier" => Some((SymbolKind::Enum, child_text(node, "name", source))),
+            "function_definition" => {
+                let decl = node.child_by_field_name("declarator");
+                let name = if let Some(decl) = decl {
+                    // Try to dig out the identifier
+                    let mut cursor = decl.walk();
+                    let mut name = String::new();
+                    // simple heuristic: find the innermost identifier or scoped_identifier
+                    let mut current = decl;
+                    while let Some(child) = current.child_by_field_name("declarator") {
+                        current = child;
+                    }
+                    if let Some(id) = current.child(0) {
+                        if id.kind() == "identifier" || id.kind() == "scoped_identifier" {
+                            name = node_text(id, source);
+                        }
+                    }
+                    if name.is_empty() {
+                        node_text(current, source)
+                    } else {
+                        name
+                    }
+                } else {
+                    "".to_string()
+                };
+                Some((SymbolKind::Function, name))
+            }
+            "namespace_definition" => {
+                Some((SymbolKind::Namespace, child_text(node, "name", source)))
+            }
             _ => None,
         },
     }
@@ -402,5 +498,42 @@ mod tests {
         // And both should be functions, with different bodies.
         assert!(news.iter().all(|s| s.kind == SymbolKind::Function));
         assert_ne!(news[0].start_line, news[1].start_line);
+    }
+    #[test]
+    fn go_symbols_are_extracted() {
+        let src = "package main\n\ntype Handler interface {\n\tServeHTTP()\n}\n\ntype Server struct {\n\tport int\n}\n\nfunc (s *Server) ServeHTTP() {}\n\nconst Version = \"1.0.0\"\n";
+        let path = PathBuf::from("main.go");
+        let syms = parse_symbols(&path, src, &registry()).expect("parses");
+        
+        assert!(syms.iter().any(|s| s.name == "Handler" && s.kind == SymbolKind::Interface));
+        assert!(syms.iter().any(|s| s.name == "Server" && s.kind == SymbolKind::Struct));
+        assert!(syms.iter().any(|s| s.name == "ServeHTTP" && s.kind == SymbolKind::Function));
+        assert!(syms.iter().any(|s| s.name == "Version" && s.kind == SymbolKind::Const));
+    }
+
+    #[test]
+    fn java_symbols_are_extracted() {
+        let src = "package com.example;\n\npublic interface Runnable { void run(); }\n\npublic class App implements Runnable {\n    public enum Status { OK, ERROR }\n    public App() {}\n    public void run() {}\n}\n";
+        let path = PathBuf::from("App.java");
+        let syms = parse_symbols(&path, src, &registry()).expect("parses");
+        
+        assert!(syms.iter().any(|s| s.name == "Runnable" && s.kind == SymbolKind::Interface));
+        assert!(syms.iter().any(|s| s.name == "App" && s.kind == SymbolKind::Struct));
+        assert!(syms.iter().any(|s| s.name == "Status" && s.kind == SymbolKind::Enum));
+        assert!(syms.iter().any(|s| s.name == "App" && s.kind == SymbolKind::Function)); // Constructor
+        assert!(syms.iter().any(|s| s.name == "run" && s.kind == SymbolKind::Function));
+    }
+
+    #[test]
+    fn cpp_symbols_are_extracted() {
+        let src = "namespace math {\n    class Vector {};\n    struct Point { int x, y; };\n    enum Color { RED, BLUE };\n    void draw(Point p) {}\n}\n";
+        let path = PathBuf::from("math.cpp");
+        let syms = parse_symbols(&path, src, &registry()).expect("parses");
+        
+        assert!(syms.iter().any(|s| s.name == "math" && s.kind == SymbolKind::Namespace));
+        assert!(syms.iter().any(|s| s.name == "Vector" && s.kind == SymbolKind::Struct));
+        assert!(syms.iter().any(|s| s.name == "Point" && s.kind == SymbolKind::Struct));
+        assert!(syms.iter().any(|s| s.name == "Color" && s.kind == SymbolKind::Enum));
+        assert!(syms.iter().any(|s| s.name == "draw" && s.kind == SymbolKind::Function));
     }
 }

@@ -143,7 +143,7 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
         )
     })?;
 
-    let provider = create_provider(&config.provider, &config.model, &config.api_key)?;
+    let provider = crate::create_provider_instance(&config.provider, &config.model, &config.api_key)?;
     let forge_toml = load_forge_toml(&config.config_path)?;
     let verify_commands = resolve_verify_commands(&workdir, forge_toml.as_ref());
     let max_retries = forge_toml
@@ -206,23 +206,7 @@ fn failed_result(
     })
 }
 
-fn create_provider(provider: &str, model: &str, api_key: &str) -> Result<Arc<dyn ModelProvider>> {
-    match provider.to_lowercase().as_str() {
-        "anthropic" => Ok(Arc::new(AnthropicProvider::new(api_key, model)?)),
-        "openai" => Ok(Arc::new(OpenAIProvider::new(model, api_key))),
-        "zai" | "z.ai" | "glm" => Ok(Arc::new(OpenAIProvider::with_base_url(
-            model,
-            api_key,
-            "https://api.z.ai/api/paas/v4/chat/completions",
-        ))),
-        "gemini" => Ok(Arc::new(GeminiProvider::new(model, api_key))),
-        "local" => Ok(Arc::new(LocalProvider::new_ollama(
-            "http://localhost:11434",
-            model,
-        ))),
-        other => anyhow::bail!("Unknown provider: {other}"),
-    }
-}
+
 
 fn load_forge_toml(path: &Path) -> Result<Option<ForgeToml>> {
     if !path.exists() {

@@ -1,15 +1,17 @@
 # Forge
 
+
+
 **An open-source CLI coding agent - 2027-grade successor to Codex CLI, Claude Code, Droid and Augment**
 
 ## Vision
 
-Forge is a single Rust binary (no Node/Python runtime) that aims to be lighter than Codex, model-agnostic + local-first, with a semantic context engine and parallel multi-agent orchestration with long-horizon endurance.
+Forge is a single Rust binary (no Node/Python runtime) that aims to be lighter than Codex, model-agnostic, with a semantic context engine and parallel multi-agent orchestration with long-horizon endurance.
 
 ## Non-Negotiable Principles
 
 1. **One static binary, instant startup** - No Node/Python runtime
-2. **Model-agnostic** - `ModelProvider` trait with OpenAI, Anthropic, Gemini and local (Ollama/llama.cpp) impls
+2. **Model-agnostic** - `ModelProvider` trait with OpenAI, Anthropic, Gemini, ZAI, and OpenRouter impls
 3. **Semantic context** - tree-sitter + knowledge graph + local vector store, NOT grep-everything
 4. **Isolated subagent contexts** - Auto git worktrees for safe parallelism
 5. **Mandatory verify loop** - Never report done until tests/build pass
@@ -21,22 +23,15 @@ Forge is a single Rust binary (no Node/Python runtime) that aims to be lighter t
 
 Forge CLI supports multiple AI model providers via the `--provider` flag. The
 **default is `zai` with model `glm-5.1`** (Z.AI), as defined by the CLI defaults
-in `forge-cli/src/main.rs` and by `forge.toml`. This is the single source of
-truth; if any other doc disagrees, the code wins.
+in `forge-cli/src/main.rs` and by `forge.toml`.
 
-- **Z.AI** *(default)* — GLM models (`glm-5.1`, `glm-4.7`, `glm-4.5`, `glm-4.5-air`) via the OpenAI-compatible `api.z.ai` endpoint.
-- **Anthropic** — Claude models.
-- **OpenAI** — GPT models via the OpenAI API.
-- **Gemini** — Google Gemini models.
-- **Local** — Local models via Ollama (`http://localhost:11434`).
+- **Z.AI** *(default)* — GLM models (`glm-5.1`, `glm-4.7`, `glm-4.5`, `glm-4.5-air`) via the OpenAI-compatible `api.z.ai` endpoint. Requires `ZAI_API_KEY`.
+- **Anthropic** — Claude models (e.g. `claude-3-5-sonnet`). Requires `ANTHROPIC_API_KEY`.
+- **OpenAI** — GPT models (e.g. `gpt-4o`). Requires `OPENAI_API_KEY`.
+- **Gemini** — Google Gemini models (e.g. `gemini-1.5-pro`). Requires `GEMINI_API_KEY`.
+- **OpenRouter** — Any model via OpenRouter (e.g. `anthropic/claude-sonnet-4`). Requires `OPENROUTER_API_KEY`.
 
-> ⚠️ **Known inconsistency (Phase 1+):** `forge exec` (headless mode in
-> `forge-cli/src/exec.rs`) currently hardcodes the Anthropic provider and
-> `ANTHROPIC_API_KEY`, ignoring the `--provider`/`--model`/`--api-key` flags.
-> The interactive `forge repl` respects all flags. See "Deferred" in
-> `CURRENT_STATUS.md`.
-
-See [docs/providers/](docs/providers/) for detailed documentation.
+Both interactive TUI (`forge repl --tui`) and headless execution (`forge exec`) modes fully respect the specified provider and API key configuration options.
 
 ## Architecture
 
@@ -63,15 +58,15 @@ Forge's original roadmap was staged across `v0.100.0` → `v0.190.0`. In practic
 most subsystems have already been **scaffolded with passing tests**, but not all
 are wired into the running binary end-to-end. The table below is the honest
 per-capability status as of this build (verified by `cargo build` + `cargo
-test`; see `CURRENT_STATUS.md` for the full audit).
+test`; see `docs.md` for the reference design).
 
 Legend: ✅ working · 🟡 partial · ⚪ scaffold-only (compiles, tests pass, not
 exercised by the live binary).
 
 | Capability | Crate(s) | Status | Notes |
 | --- | --- | --- | --- |
-| CLI + tool→observe→act event loop | forge-cli, forge-core | ✅ | `repl` mode; `exec` hardcoded to Anthropic (see below) |
-| `ModelProvider` trait + impls | provider | ✅ | Anthropic, OpenAI, Z.AI (default), Gemini, Local(Ollama). 19 unit tests, offline. |
+| CLI + tool→observe→act event loop | forge-cli, forge-core | ✅ | TUI mode is interactive; headless exec supports all configured providers. |
+| `ModelProvider` trait + impls | provider | ✅ | Anthropic, OpenAI, Z.AI (default), Gemini, OpenRouter. |
 | File read / diff-edit / run-command | forge-core | 🟡 | trait + loop present; tools are exercised via tests, not a polished REPL UX |
 | Sandbox (network-off, dir-scoped) | sandbox | ✅ | path-traversal guards; 5 tests. Plain `repl` prints a stub message. |
 | AGENTS.md loading (layered) | context | ✅ | bounded + unbounded discovery; 79 tests |
@@ -81,7 +76,7 @@ exercised by the live binary).
 | Verify loop (build/test) | verify | ✅ | `BuildVerifier`; 4 tests |
 | Extensions: MCP / hooks / skills / observability | ext | ⚪ | modules compile with 63 passing unit tests; not wired into the CLI yet |
 | TUI | forge-tui | 🟡 | ratatui-based `SimpleTui` with event loop; 36 tests. Conversation rendering only. |
-| `forge exec` headless | forge-cli | 🟡 | runs, but ignores `--provider/--model/--api-key` and uses Anthropic |
+| `forge exec` headless | forge-cli | ✅ | fully functional; respects all provider configuration flags. |
 
 ### Original milestone plan (aspirational)
 
@@ -93,7 +88,7 @@ The version milestones below remain useful as a forward backlog. They are
 - **v0.150.0** — Incremental sync (file watcher) + verify-symbol-before-edit
 - **v0.170.0** — Agents orchestrator + isolated subagents + auto git worktree
 - **v0.180.0** — Checkpoint/resume + mandatory verify loop
-- **v0.190.0** — MCP client/server + hooks + skills + `forge exec` headless + multi-provider (incl. local) + observability
+- **v0.190.0** — MCP client/server + hooks + skills + `forge exec` headless + multi-provider + observability
 
 ## Versioning
 
@@ -176,13 +171,12 @@ This is an early MVP. What is true of this build:
 - ✅ `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 - ✅ `cargo fmt --all -- --check` is clean.
 - ✅ `cargo test --workspace` is **green and fully offline** (234 tests; 1 ignored integration test gated behind the `integration` feature).
-- ✅ CI gates fmt + clippy + build + offline test on ubuntu, macOS, and Windows (GNU target). See `.github/workflows/ci.yml`.
+- ✅ CI gates fmt + clippy + build + offline test on ubuntu, macOS, and Windows. See `.github/workflows/ci.yml`.
 
 What is **not** true yet (honest gaps):
 
-- The interactive `repl` plain mode prints a stub message; the TUI renders conversation but is not a full agent loop surface.
-- `forge exec` ignores provider/model/api-key flags (hardcoded Anthropic) — see "Known inconsistency" under Supported Providers.
+- The interactive `repl` plain mode prints a welcome/stub message; the TUI provides a functional environment that executes the event loop and displays the summary of steps, but does not yet support real-time token/cost streaming or interactive human-in-the-loop approvals.
 - Extensions (MCP/hooks/skills/observability) compile and are unit-tested but are not wired into the CLI.
 - Default provider is **Z.AI / glm-5.1** (not Anthropic and not OpenAI), per the code.
 
-See `CURRENT_STATUS.md` for the per-crate audit and the Phase 0 deferred list.
+See `docs.md` for reference design specifications.

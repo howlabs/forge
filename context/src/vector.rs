@@ -63,6 +63,9 @@ pub trait Embedder {
 
     /// Dimensionality of the embedding vectors returned by [`Self::embed`].
     fn dim(&self) -> usize;
+
+    /// The name of the model used to generate embeddings.
+    fn model(&self) -> &str;
 }
 
 // =============================================================================
@@ -76,8 +79,11 @@ pub trait Embedder {
 pub struct VectorStore {
     dir: PathBuf,
     dim: usize,
+    model: String,
     chunks: HashMap<u64, Chunk>,
     embeddings: HashMap<u64, Vec<f32>>,
+    /// Maps a file path to all chunk IDs that belong to it
+    file_index: HashMap<PathBuf, Vec<u64>>,
     dirty: bool,
 }
 
@@ -92,6 +98,8 @@ struct StoreEntry {
 #[derive(Serialize, Deserialize)]
 struct StoreData {
     dim: usize,
+    #[serde(default)]
+    model: String,
     entries: Vec<StoreEntry>,
 }
 
@@ -105,37 +113,46 @@ impl VectorStore {
     /// If `dir/vector_store.json` exists it is loaded.  Otherwise an empty
     /// store is created.  `dim` must match the dimensionality of the
     /// embeddings that will be inserted.
-    pub fn open(dir: &Path, dim: usize) -> Result<Self> {
+    pub fn open(dir: &Path, dim: usize, model: &str) -> Result<Self> {
         let path = dir.join("vector_store.json");
-        let (chunks, embeddings) = if path.is_file() {
+        let (chunks, embeddings, file_index) = if path.is_file() {
             let data =
                 fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             let store: StoreData = serde_json::from_str(&data)
                 .with_context(|| format!("parsing {}", path.display()))?;
-            if store.dim != dim {
-                anyhow::bail!(
-                    "dimension mismatch: store has dim={} but caller specified dim={}",
-                    store.dim,
-                    dim
+            
+            // Invalidate store if dimension or model changed
+            if store.dim != dim || store.model != model {
+                tracing::info!(
+                    "model change detected: store=(dim={}, model={}), new=(dim={}, model={}). Invalidating vector store.",
+                    store.dim, store.model, dim, model
                 );
+                (HashMap::new(), HashMap::new(), HashMap::new())
+            } else {
+                let mut chunks = HashMap::with_capacity(store.entries.len());
+                let mut embeddings = HashMap::with_capacity(store.entries.len());
+                let mut file_index: HashMap<PathBuf, Vec<u64>> = HashMap::new();
+                
+                for entry in store.entries {
+                    let id = entry.chunk.id;
+                    let path = entry.chunk.file.clone();
+                    file_index.entry(path).or_default().push(id);
+                    chunks.insert(id, entry.chunk);
+                    embeddings.insert(id, entry.embedding);
+                }
+                (chunks, embeddings, file_index)
             }
-            let mut chunks = HashMap::with_capacity(store.entries.len());
-            let mut embeddings = HashMap::with_capacity(store.entries.len());
-            for entry in store.entries {
-                let id = entry.chunk.id;
-                chunks.insert(id, entry.chunk);
-                embeddings.insert(id, entry.embedding);
-            }
-            (chunks, embeddings)
         } else {
-            (HashMap::new(), HashMap::new())
+            (HashMap::new(), HashMap::new(), HashMap::new())
         };
 
         Ok(Self {
             dir: dir.to_path_buf(),
             dim,
+            model: model.to_string(),
             chunks,
             embeddings,
+            file_index,
             dirty: false,
         })
     }
@@ -158,6 +175,9 @@ impl VectorStore {
         }
         let normalized = l2_normalize(&embedding);
         let id = chunk.id;
+        let path = chunk.file.clone();
+        
+        self.file_index.entry(path).or_default().push(id);
         self.chunks.insert(id, chunk);
         self.embeddings.insert(id, normalized);
         self.dirty = true;
@@ -168,7 +188,19 @@ impl VectorStore {
     pub fn clear(&mut self) {
         self.chunks.clear();
         self.embeddings.clear();
+        self.file_index.clear();
         self.dirty = true;
+    }
+
+    /// Remove all chunks associated with a specific file.
+    pub fn remove_file(&mut self, path: &Path) {
+        if let Some(ids) = self.file_index.remove(path) {
+            for id in ids {
+                self.chunks.remove(&id);
+                self.embeddings.remove(&id);
+            }
+            self.dirty = true;
+        }
     }
 
     /// Search for the `k` chunks most similar to `query` by cosine similarity.
@@ -230,12 +262,15 @@ impl VectorStore {
 
         let store = StoreData {
             dim: self.dim,
+            model: self.model.clone(),
             entries,
         };
 
         let json = serde_json::to_string_pretty(&store).context("serialising vector store")?;
         let path = self.dir.join("vector_store.json");
-        fs::write(&path, &json).with_context(|| format!("writing {}", path.display()))?;
+        let tmp_path = self.dir.join("vector_store.json.tmp");
+        fs::write(&tmp_path, &json).with_context(|| format!("writing {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, &path).with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
         Ok(())
     }
 
@@ -276,6 +311,92 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 }
 
 // =============================================================================
+// API Embedder
+// =============================================================================
+
+/// Remote embedder that hits an OpenAI-compatible API.
+pub struct ApiEmbedder {
+    client: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+    dim: usize,
+}
+
+impl ApiEmbedder {
+    /// Creates a new `ApiEmbedder`. `base_url` should be the base path (e.g. `https://api.openai.com/v1`).
+    pub fn new(base_url: String, api_key: String, model: String, dim: usize) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url,
+            api_key,
+            model,
+            dim,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct EmbedRequest<'a> {
+    input: &'a [String],
+    model: &'a str,
+}
+
+#[derive(Deserialize)]
+struct EmbedResponse {
+    data: Vec<EmbedData>,
+}
+
+#[derive(Deserialize)]
+struct EmbedData {
+    embedding: Vec<f32>,
+}
+
+impl Embedder for ApiEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let req = EmbedRequest {
+            input: texts,
+            model: &self.model,
+        };
+
+        // Some APIs expect /v1/embeddings.
+        let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
+
+        let future = self.client.post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&req)
+            .send();
+
+        // `Embedder` is currently a synchronous trait, but we run within Tokio.
+        let handle = tokio::runtime::Handle::current();
+        let res = handle.block_on(async {
+            let resp = future.await?;
+            let resp = resp.error_for_status()?;
+            let body: EmbedResponse = resp.json().await?;
+            Ok::<_, reqwest::Error>(body)
+        })?;
+
+        let mut results = Vec::with_capacity(texts.len());
+        for d in res.data {
+            results.push(d.embedding);
+        }
+        Ok(results)
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -294,11 +415,12 @@ mod tests {
     /// vector.
     struct MockEmbedder {
         dim: usize,
+        model: String,
     }
 
     impl MockEmbedder {
-        fn new(dim: usize) -> Self {
-            Self { dim }
+        fn new(dim: usize, model: &str) -> Self {
+            Self { dim, model: model.to_string() }
         }
 
         fn vector_for(text: &str, dim: usize) -> Vec<f32> {
@@ -324,6 +446,10 @@ mod tests {
         fn dim(&self) -> usize {
             self.dim
         }
+
+        fn model(&self) -> &str {
+            &self.model
+        }
     }
 
     // ---- helpers -----------------------------------------------------------
@@ -347,7 +473,7 @@ mod tests {
     #[test]
     fn open_creates_empty_store() {
         let dir = tmp_dir();
-        let store = VectorStore::open(dir.path(), 4).unwrap();
+        let store = VectorStore::open(dir.path(), 4, "mock").unwrap();
         assert!(store.is_empty());
         assert_eq!(store.dim(), 4);
     }
@@ -355,7 +481,7 @@ mod tests {
     #[test]
     fn upsert_and_get() {
         let dir = tmp_dir();
-        let mut store = VectorStore::open(dir.path(), 3).unwrap();
+        let mut store = VectorStore::open(dir.path(), 3, "mock").unwrap();
         let c = chunk(1, "a.rs", 1, 5, "fn a() {}");
         store.upsert(c.clone(), vec![1.0, 0.0, 0.0]).unwrap();
         assert_eq!(store.get(1), Some(&c));
@@ -364,7 +490,7 @@ mod tests {
     #[test]
     fn dimension_mismatch_on_upsert_returns_err() {
         let dir = tmp_dir();
-        let mut store = VectorStore::open(dir.path(), 3).unwrap();
+        let mut store = VectorStore::open(dir.path(), 3, "mock").unwrap();
         let c = chunk(1, "x.rs", 1, 1, "x");
         let result = store.upsert(c, vec![0.1, 0.2]); // dim 2 ≠ 3
         assert!(result.is_err(), "expected Err on dimension mismatch");
@@ -372,9 +498,9 @@ mod tests {
 
     #[test]
     fn search_ranks_closest_chunk_first() {
-        let embedder = MockEmbedder::new(8);
+        let embedder = MockEmbedder::new(8, "mock");
         let dir = tmp_dir();
-        let mut store = VectorStore::open(dir.path(), 8).unwrap();
+        let mut store = VectorStore::open(dir.path(), 8, "mock").unwrap();
 
         // Three chunks with different texts → different vectors.
         let texts = [
@@ -426,14 +552,14 @@ mod tests {
 
         // Write.
         {
-            let mut store = VectorStore::open(dir.path(), dim).unwrap();
+            let mut store = VectorStore::open(dir.path(), dim, "mock").unwrap();
             store.upsert(c.clone(), emb).unwrap();
             store.persist().unwrap();
         }
 
         // Re-open and verify.
         {
-            let store = VectorStore::open(dir.path(), dim).unwrap();
+            let store = VectorStore::open(dir.path(), dim, "mock").unwrap();
             assert_eq!(store.len(), 1);
             assert_eq!(store.get(42), Some(&c));
         }
@@ -442,7 +568,7 @@ mod tests {
     #[test]
     fn persist_file_exists_after_persist() {
         let dir = tmp_dir();
-        let mut store = VectorStore::open(dir.path(), 2).unwrap();
+        let mut store = VectorStore::open(dir.path(), 2, "mock").unwrap();
         store
             .upsert(chunk(1, "f.rs", 1, 1, "x"), vec![1.0, 0.0])
             .unwrap();
@@ -455,21 +581,21 @@ mod tests {
         let dir = tmp_dir();
         let dim = 4;
         {
-            let mut store = VectorStore::open(dir.path(), dim).unwrap();
+            let mut store = VectorStore::open(dir.path(), dim, "mock").unwrap();
             store
                 .upsert(chunk(1, "f.rs", 1, 1, "x"), vec![1.0, 0.0, 0.0, 0.0])
                 .unwrap();
             store.persist().unwrap();
         }
         // Re-open with wrong dim.
-        let result = VectorStore::open(dir.path(), 8);
+        let result = VectorStore::open(dir.path(), 8, "mock");
         assert!(result.is_err(), "expected Err on dim mismatch at open");
     }
 
     #[test]
     fn search_empty_store_returns_empty() {
         let dir = tmp_dir();
-        let store = VectorStore::open(dir.path(), 3).unwrap();
+        let store = VectorStore::open(dir.path(), 3, "mock").unwrap();
         let results = store.search(&[1.0, 0.0, 0.0], 5);
         assert!(results.is_empty());
     }
@@ -477,7 +603,7 @@ mod tests {
     #[test]
     fn search_k_zero_returns_empty() {
         let dir = tmp_dir();
-        let mut store = VectorStore::open(dir.path(), 3).unwrap();
+        let mut store = VectorStore::open(dir.path(), 3, "mock").unwrap();
         store
             .upsert(chunk(1, "f.rs", 1, 1, "x"), vec![1.0, 0.0, 0.0])
             .unwrap();
@@ -488,7 +614,7 @@ mod tests {
     #[test]
     fn upsert_replaces_existing_chunk() {
         let dir = tmp_dir();
-        let mut store = VectorStore::open(dir.path(), 2).unwrap();
+        let mut store = VectorStore::open(dir.path(), 2, "mock").unwrap();
         store
             .upsert(chunk(1, "a.rs", 1, 1, "first"), vec![1.0, 0.0])
             .unwrap();
@@ -503,9 +629,9 @@ mod tests {
 
     #[test]
     fn search_results_are_sorted_descending() {
-        let embedder = MockEmbedder::new(4);
+        let embedder = MockEmbedder::new(4, "mock");
         let dir = tmp_dir();
-        let mut store = VectorStore::open(dir.path(), 4).unwrap();
+        let mut store = VectorStore::open(dir.path(), 4, "mock").unwrap();
 
         let texts = ["apple", "banana", "cherry", "date"];
         for (i, text) in texts.iter().enumerate() {
@@ -542,14 +668,14 @@ mod tests {
     #[test]
     fn search_wrong_dimension_returns_empty() {
         let dir = tmp_dir();
-        let store = VectorStore::open(dir.path(), 3).unwrap();
+        let store = VectorStore::open(dir.path(), 3, "mock").unwrap();
         let results = store.search(&[1.0, 0.0], 1); // dim 2 ≠ 3
         assert!(results.is_empty(), "expected empty for dim mismatch");
     }
 
     #[test]
     fn mock_embedder_is_deterministic() {
-        let e = MockEmbedder::new(16);
+        let e = MockEmbedder::new(16, "mock");
         let t = "hello world".to_string();
         let v1 = e.embed(std::slice::from_ref(&t)).unwrap();
         let v2 = e.embed(std::slice::from_ref(&t)).unwrap();
@@ -558,7 +684,7 @@ mod tests {
 
     #[test]
     fn mock_embedder_dim_matches() {
-        let e = MockEmbedder::new(7);
+        let e = MockEmbedder::new(7, "mock");
         assert_eq!(e.dim(), 7);
         let v = e.embed(&["x".to_string()]).unwrap();
         assert_eq!(v[0].len(), 7);
@@ -567,7 +693,7 @@ mod tests {
     #[test]
     fn equal_scores_break_ties_by_id() {
         let dir = tmp_dir();
-        let mut s = VectorStore::open(dir.path(), 2).unwrap();
+        let mut s = VectorStore::open(dir.path(), 2, "mock").unwrap();
         // Two chunks with identical embedding → identical score.
         s.upsert(chunk(5, "a.rs", 1, 1, "a"), vec![1.0, 0.0])
             .unwrap();

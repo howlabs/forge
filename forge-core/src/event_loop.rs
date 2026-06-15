@@ -393,7 +393,15 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use async_trait::async_trait;
-    use context::MockContextIndex;
+
+    struct MockContextIndex;
+    impl MockContextIndex {
+        fn new() -> Self { Self }
+    }
+    impl context::ContextIndex for MockContextIndex {
+        fn upsert_file(&mut self, _path: &std::path::Path, _src: &str) {}
+        fn remove_file(&mut self, _path: &std::path::Path) {}
+    }
     use forge_ext::mcp::McpTool;
     use provider::anthropic::AnthropicProvider;
     use std::collections::{HashMap, VecDeque};

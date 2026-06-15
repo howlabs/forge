@@ -26,6 +26,6 @@
 # See `.github/workflows/ci.yml` for the canonical, known-good invocation.
 
 [toolchain]
-channel = "1.83.0"
+channel = "stable"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

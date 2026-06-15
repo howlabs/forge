@@ -196,6 +196,48 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Remove all symbols and edges associated with a specific file.
+    pub fn remove_file(&mut self, path: &Path) {
+        // Find all symbol IDs belonging to this file
+        let mut ids_to_remove = Vec::new();
+        for (i, sym_opt) in self.symbols.iter().enumerate() {
+            if let Some(sym) = sym_opt {
+                if sym.file == path {
+                    ids_to_remove.push(SymbolId(i as u32 + 1));
+                }
+            }
+        }
+
+        for id in &ids_to_remove {
+            // Remove from by_name
+            if let Some(sym) = self.symbol(*id) {
+                if let Some(set) = self.by_name.get_mut(&sym.name) {
+                    set.remove(id);
+                    if set.is_empty() {
+                        // ponytail: YAGNI - we don't strictly need to remove empty sets,
+                        // but it's cleaner.
+                        let name_to_remove = sym.name.clone();
+                        self.by_name.remove(&name_to_remove);
+                    }
+                }
+            }
+
+            // Remove all outgoing edges from this id
+            self.adj.retain(|(from, _), _| from != id);
+
+            // Remove this id from all incoming edges
+            for set in self.adj.values_mut() {
+                set.remove(id);
+            }
+
+            // Finally, nullify the symbol
+            self.symbols[id.0 as usize - 1] = None;
+        }
+
+        // Remove from tracked files
+        self.files.retain(|p| p != path);
+    }
+
     // -------------------------------------------------------------------------
     // Internals
     // -------------------------------------------------------------------------

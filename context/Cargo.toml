@@ -11,6 +11,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 
 # Tree-sitter for parsing (pinned exact versions for reproducibility)
 tree-sitter = "=0.20.10"
@@ -18,13 +19,12 @@ tree-sitter-rust = "=0.20.4"
 tree-sitter-python = "=0.20.4"
 tree-sitter-javascript = "=0.20.4"
 tree-sitter-typescript = "=0.20.5"
+tree-sitter-go = "0.20"
+tree-sitter-java = "0.20"
+tree-sitter-cpp = "0.20"
 walkdir = "2"
 
-# Knowledge graph (pre-existing; used by v0.100.0 KnowledgeGraph)
-petgraph = "0.6"
 
-# Vector store & embeddings (pre-existing; used by v0.100.0 hashing)
-fnv = "1.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }
