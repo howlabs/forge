@@ -2316,9 +2316,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "forge-core",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
 ]
 

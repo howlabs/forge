@@ -259,7 +259,18 @@ fn detect_verify_commands(workdir: &Path) -> Option<Vec<String>> {
     if workdir.join("go.mod").exists() {
         return Some(vec!["go test ./...".into()]);
     }
-    if workdir.join("Makefile").exists() {
+    if workdir.join("pom.xml").exists() {
+        return Some(vec!["mvn test".into()]);
+    }
+    if workdir.join("build.gradle").exists() || workdir.join("build.gradle.kts").exists() {
+        let runner = if workdir.join("gradlew").exists() {
+            "./gradlew test"
+        } else {
+            "gradle test"
+        };
+        return Some(vec![runner.into()]);
+    }
+    if workdir.join("Makefile").exists() || workdir.join("makefile").exists() {
         return Some(vec!["make test".into()]);
     }
     None

@@ -67,15 +67,15 @@ exercised by the live binary).
 | --- | --- | --- | --- |
 | CLI + tool→observe→act event loop | forge-cli, forge-core | ✅ | TUI mode is interactive; headless exec supports all configured providers. |
 | `ModelProvider` trait + impls | provider | ✅ | Anthropic, OpenAI, Z.AI (default), Gemini, OpenRouter. |
-| File read / diff-edit / run-command | forge-core | 🟡 | trait + loop present; tools are exercised via tests, not a polished REPL UX |
+| File read / diff-edit / run-command | forge-core | ✅ | `tool_read_file`/`tool_write_file`/`tool_diff_edit`/`tool_run_command` exercised via 15 event-loop tests (MockProvider). |
 | Sandbox (network-off, dir-scoped) | sandbox | ✅ | path-traversal guards; 5 tests. Plain `repl` prints a stub message. |
 | AGENTS.md loading (layered) | context | ✅ | bounded + unbounded discovery; 79 tests |
-| Semantic context engine (tree-sitter + KG + vector store) | context | 🟡 | full indexer/graph/vector impl with 79 passing tests; not yet the default retrieval path in the live loop |
+| Semantic context engine (tree-sitter + KG + vector store) | context | 🟡 | 80 tests; `ContextEngine` used in CLI, but `ContextIndex` (tree-sitter + KG + vector) is opt-in via `.with_context_index()`, not the default retrieval path |
 | Multi-agent orchestrator + git worktree | agents | ✅ | spawn/join, worktree-per-task; 10 tests |
-| Checkpoint / resume | verify, forge-cli | 🟡 | `FileCheckpointStore` + `--resume` load & display; state restore is a TODO |
+| Checkpoint / resume | verify, forge-cli | 🟡 | `FileCheckpointStore` + `--resume` loads & displays checkpoint; state restore is a TODO |
 | Verify loop (build/test) | verify | ✅ | `BuildVerifier`; 4 tests |
-| Extensions: MCP / hooks / skills / observability | ext | ⚪ | modules compile with 63 passing unit tests; not wired into the CLI yet |
-| TUI | forge-tui | 🟡 | ratatui-based `SimpleTui` with event loop; 36 tests. Conversation rendering only. |
+| Extensions: MCP / hooks / skills / observability | ext | ⚪ | 152 tests; compile but not wired into CLI or TUI |
+| TUI | forge-tui | 🟡 | `SimpleTui` + `TuiApp` with EventLoop integration, conversation/diff/agent panels, input handling; 36 tests. No real-time streaming yet. |
 | `forge exec` headless | forge-cli | ✅ | fully functional; respects all provider configuration flags. |
 
 ### Original milestone plan (aspirational)
@@ -170,13 +170,14 @@ This is an early MVP. What is true of this build:
 - ✅ The full 9-crate workspace **compiles** (`cargo build --workspace --all-targets`) and **links a single `forge` binary** (`cargo build --release`).
 - ✅ `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 - ✅ `cargo fmt --all -- --check` is clean.
-- ✅ `cargo test --workspace` is **green and fully offline** (234 tests; 1 ignored integration test gated behind the `integration` feature).
+- ✅ `cargo test --workspace` is **green and fully offline** (336 tests; 1 ignored integration test gated behind the `integration` feature).
 - ✅ CI gates fmt + clippy + build + offline test on ubuntu, macOS, and Windows. See `.github/workflows/ci.yml`.
 
 What is **not** true yet (honest gaps):
 
-- The interactive `repl` plain mode prints a welcome/stub message; the TUI provides a functional environment that executes the event loop and displays the summary of steps, but does not yet support real-time token/cost streaming or interactive human-in-the-loop approvals.
-- Extensions (MCP/hooks/skills/observability) compile and are unit-tested but are not wired into the CLI.
+- The interactive `repl` plain mode prints a welcome/stub message; the TUI provides a functional environment with conversation/diff/agent panels and runs the event loop end-to-end, but does not yet support real-time token/cost streaming or interactive human-in-the-loop approvals.
+- Extensions (MCP/hooks/skills/observability) compile and have 152 passing unit tests, but are not wired into the CLI or TUI.
+- The semantic context engine's `ContextIndex` (tree-sitter + KG + vector store) is opt-in via `.with_context_index()` — not the default retrieval path in the live binary.
 - Default provider is **Z.AI / glm-5.1** (not Anthropic and not OpenAI), per the code.
 
 See `docs.md` for reference design specifications.
