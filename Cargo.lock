@@ -460,6 +460,7 @@ version = "0.100.0"
 dependencies = [
  "agents",
  "anyhow",
+ "async-trait",
  "atty",
  "clap",
  "context",
@@ -469,7 +470,9 @@ dependencies = [
  "sandbox",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",

@@ -19,8 +19,11 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
+async-trait = { workspace = true }
 uuid = { version = "1.6", features = ["v4"] }
 atty = "0.2"
+tempfile = { workspace = true }
 
 [[bin]]
 name = "forge"

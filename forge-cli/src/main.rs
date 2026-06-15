@@ -200,11 +200,11 @@ async fn main() -> Result<()> {
         }
         Commands::Exec {
             task,
-            project_path: _,
-            config: _,
-            api_key: _,
-            provider: _,
-            model: _,
+            project_path,
+            config,
+            api_key,
+            provider,
+            model,
             verify,
             format,
             trace,
@@ -213,6 +213,11 @@ async fn main() -> Result<()> {
 
             let exec_config = ExecConfig {
                 task,
+                project_path: std::path::PathBuf::from(project_path),
+                config_path: std::path::PathBuf::from(config),
+                api_key,
+                provider,
+                model,
                 verify,
                 output_format: format.clone(),
                 trace,
