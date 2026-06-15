@@ -551,8 +551,8 @@ mod tests {
     fn mock_embedder_is_deterministic() {
         let e = MockEmbedder::new(16);
         let t = "hello world".to_string();
-        let v1 = e.embed(&[t.clone()]).unwrap();
-        let v2 = e.embed(&[t]).unwrap();
+        let v1 = e.embed(std::slice::from_ref(&t)).unwrap();
+        let v2 = e.embed(std::slice::from_ref(&t)).unwrap();
         assert_eq!(v1, v2);
     }
 

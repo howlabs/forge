@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_conversation_entry_types() {
-        let entries = vec![
+        let entries = [
             ConversationEntry::User("u".to_string()),
             ConversationEntry::Assistant("a".to_string()),
             ConversationEntry::System("s".to_string()),

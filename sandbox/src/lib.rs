@@ -78,10 +78,7 @@ impl Sandbox {
             std::fs::create_dir_all(parent)?;
             if let Ok(parent_canonical) = parent.canonicalize() {
                 if !parent_canonical.starts_with(&project_canonical) {
-                    return Err(anyhow::anyhow!(
-                        "Path traversal not allowed: {}",
-                        path
-                    ));
+                    return Err(anyhow::anyhow!("Path traversal not allowed: {}", path));
                 }
             }
         }
