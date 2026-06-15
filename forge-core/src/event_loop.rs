@@ -1,6 +1,6 @@
 use anyhow::Result;
 use context::{ContextEngine, ContextIndex};
-use forge_ext::mcp::{McpClient, McpTool};
+use forge_ext::mcp::{McpClient, McpServer, McpTool, shared_server, SharedMcpServer};
 use provider::{Message, ModelProvider, ToolCall};
 use sandbox::Sandbox;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,7 @@ pub struct EventLoop<P: ModelProvider> {
     context_index: Option<Arc<Mutex<dyn ContextIndex>>>,
     mcp_client: Option<Arc<Mutex<McpClient>>>,
     mcp_tools: Vec<McpTool>,
+    mcp_server: Option<SharedMcpServer>,
 }
 
 impl<P: ModelProvider> EventLoop<P> {
@@ -80,6 +81,7 @@ impl<P: ModelProvider> EventLoop<P> {
             context_index: None,
             mcp_client: None,
             mcp_tools: Vec::new(),
+            mcp_server: None,
         }
     }
 
@@ -97,6 +99,75 @@ impl<P: ModelProvider> EventLoop<P> {
         self.mcp_tools = tools;
         self.mcp_client = Some(Arc::new(Mutex::new(client)));
         Ok(self)
+    }
+
+    /// Create an MCP server that exposes Forge's built-in tools
+    pub fn with_mcp_server(mut self) -> Self {
+        let mut server = McpServer::new("forge", "0.100.0")
+            .with_tools(true)
+            .with_resources(true, true)
+            .with_prompts(true)
+            .with_logging();
+
+        // Register built-in tools
+        server.register_tool_simple(
+            "read_file".into(),
+            "Read the contents of a file".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative file path" }
+                },
+                "required": ["path"]
+            }),
+        );
+
+        server.register_tool_simple(
+            "write_file".into(),
+            "Write content to a file (creates or overwrites)".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative file path" },
+                    "content": { "type": "string", "description": "File content" }
+                },
+                "required": ["path", "content"]
+            }),
+        );
+
+        server.register_tool_simple(
+            "diff_edit".into(),
+            "Replace specific text in a file".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative file path" },
+                    "old_text": { "type": "string", "description": "Text to replace" },
+                    "new_text": { "type": "string", "description": "Replacement text" }
+                },
+                "required": ["path", "old_text", "new_text"]
+            }),
+        );
+
+        server.register_tool_simple(
+            "run_command".into(),
+            "Run a shell command".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command" }
+                },
+                "required": ["command"]
+            }),
+        );
+
+        self.mcp_server = Some(shared_server(server));
+        self
+    }
+
+    /// Get the shared MCP server handle
+    pub fn mcp_server(&self) -> Option<&SharedMcpServer> {
+        self.mcp_server.as_ref()
     }
 
     pub async fn run(&mut self) -> Result<usize> {
@@ -178,7 +249,7 @@ impl<P: ModelProvider> EventLoop<P> {
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let base = match context::agents::load_agents_md(&root) {
             Some(content) => content,
-            None => self.default_system_prompt(),
+            None => "You are Forge, a CLI coding agent. Help the user with software engineering tasks.".to_string(),
         };
 
         let context_chunks = self.context.retrieve(&self.task, 5).unwrap_or_default();
@@ -214,10 +285,7 @@ impl<P: ModelProvider> EventLoop<P> {
         )
     }
 
-    fn default_system_prompt(&self) -> String {
-        "You are Forge, a CLI coding agent. Help the user with software engineering tasks."
-            .to_string()
-    }
+// Removed unused default_system_prompt; get_system_prompt now always loads AGENTS.md.
 
     async fn execute_tool_with_result(&mut self, tool_call: ToolCall) -> Result<String> {
         debug!("Executing tool: {}", tool_call.name);
@@ -225,15 +293,20 @@ impl<P: ModelProvider> EventLoop<P> {
         match tool_call.name.as_str() {
             "read_file" => self.tool_read_file(tool_call).await,
             "write_file" => self.tool_write_file(tool_call).await,
-            "run_command" => self.tool_run_command(tool_call).await,
+            "run_command" => {
+                let command: String = tool_call.get_arg("command")?;
+                let output = self.sandbox.run_command(&command).await?;
+                debug!("Command output: {}", output);
+                Ok(format!("Command output:\n{}", output))
+            },
             "diff_edit" => self.tool_diff_edit(tool_call).await,
             _ => {
                 if let Some(client) = &self.mcp_client {
                     let tool_name = tool_call.name.clone();
                     let args = serde_json::to_value(&tool_call.arguments)?;
                     let mut client = client.lock().await;
-                    let result = client.call_tool(tool_name, args).await?;
-                    Ok(result.to_string())
+                    let result = client.call_tool(&tool_name, args).await?;
+                    Ok(serde_json::to_string(&result)?)
                 } else {
                     debug!("Unknown tool: {}", tool_call.name);
                     Ok(format!("Unknown tool: {}", tool_call.name))
@@ -261,12 +334,7 @@ impl<P: ModelProvider> EventLoop<P> {
         ))
     }
 
-    async fn tool_run_command(&self, tool_call: ToolCall) -> Result<String> {
-        let command: String = tool_call.get_arg("command")?;
-        let output = self.sandbox.run_command(&command).await?;
-        debug!("Command output: {}", output);
-        Ok(format!("Command output:\n{}", output))
-    }
+
 
     async fn tool_diff_edit(&mut self, tool_call: ToolCall) -> Result<String> {
         let path: String = tool_call.get_arg("path")?;
@@ -324,68 +392,51 @@ impl<P: ModelProvider> EventLoop<P> {
         Ok(())
     }
 
-    /// Extract symbol references from text (very basic implementation)
-    /// This looks for patterns like "FunctionName", "TypeName::method", etc.
+    /// Extract symbol references from text using simple inline parsing.
     fn extract_symbol_references(&self, text: &str) -> Vec<String> {
         let mut symbols = Vec::new();
-
-        // Very basic pattern matching for function/method calls
-        // This is a simplified version - in production you'd use tree-sitter
         for line in text.lines() {
-            // Look for function calls: function_name(
-            if let Some(cap) = self.extract_function_call(line) {
-                symbols.push(cap);
+            let line_trim = line.trim();
+            // Function calls: capture last word before '(' if it looks like an identifier
+            if let Some(idx) = line_trim.find('(') {
+                let before = &line_trim[..idx];
+                if let Some(last) = before.split_whitespace().last() {
+                    let func = last.trim_matches(|c| c == '.' || c == ',');
+                    if !func.is_empty() && func.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        symbols.push(func.to_string());
+                    }
+                }
             }
-
-            // Look for method calls: Type::method(
-            if let Some(cap) = self.extract_method_call(line) {
-                symbols.push(cap);
-            }
-        }
-
-        symbols
-    }
-
-    /// Extract function call pattern: "function_name("
-    fn extract_function_call(&self, line: &str) -> Option<String> {
-        let line = line.trim();
-        if !line.contains("(") {
-            return None;
-        }
-
-        // Find the last function call before "("
-        let before_paren = line.split('(').next().unwrap_or("");
-        let parts: Vec<&str> = before_paren.split_whitespace().collect();
-
-        if let Some(last_part) = parts.last() {
-            let func_name = last_part.trim_matches(|c| c == '.' || c == ',');
-            if !func_name.is_empty() && func_name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return Some(func_name.to_string());
-            }
-        }
-
-        None
-    }
-
-    /// Extract method call pattern: "TypeName::method("
-    fn extract_method_call(&self, line: &str) -> Option<String> {
-        if !line.contains("::") {
-            return None;
-        }
-
-        // Find "Type::method(" patterns
-        for part in line.split("::") {
-            if part.contains('(') {
-                let method_part = part.split('(').next().unwrap_or("");
-                let method_name = method_part.trim();
-                if !method_name.is_empty() {
-                    // Reconstruct full symbol name (simplified)
-                    return Some(format!("::{}", method_name));
+            // Method calls: capture identifier after "::" before '('
+            if line_trim.contains("::") {
+                for part in line_trim.split("::") {
+                    if let Some(idx) = part.find('(') {
+                        let method = part[..idx].trim();
+                        if !method.is_empty() {
+                            symbols.push(format!("::{}", method));
+                        }
+                    }
                 }
             }
         }
+        symbols
+    }
 
-        None
+    fn should_index(root: &Path, path: &Path) -> bool {
+        // Skip ignored dirs and hidden files, then rely on language detection
+        if let Ok(rel) = path.strip_prefix(root) {
+            for comp in rel.components() {
+                if let std::path::Component::Normal(name) = comp {
+                    if let Some(s) = name.to_str() {
+                        if s.starts_with('.') || [".git", "target", "node_modules", "dist", "build"].contains(&s) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        // Index only if the file has a known language extension
+        context::lang::Lang::for_path(path).is_some()
     }
 }
 
@@ -658,29 +709,21 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_function_call() {
-        let event_loop = EventLoop::new(
-            AnthropicProvider::new("test-key", "test-model").unwrap(),
-            ContextEngine::new("/tmp/test").unwrap(),
-            Sandbox::new("/tmp/test", "off").unwrap(),
-            "test task".to_string(),
-        );
+    fn test_event_loop_with_mcp_server() {
+        let provider = AnthropicProvider::new("test-key", "test-model").unwrap();
+        let context = ContextEngine::new("/tmp/test").unwrap();
+        let sandbox = Sandbox::new("/tmp/test", "off").unwrap();
 
-        // Test function call extraction
-        let line = "let result = some_function(arg1, arg2)";
-        let func = event_loop.extract_function_call(line);
-        assert_eq!(func, Some("some_function".to_string()));
+        let event_loop = EventLoop::new(provider, context, sandbox, "test task".to_string())
+            .with_mcp_server();
 
-        // Test method call extraction
-        let line = "let result = Type::method_name(arg1)";
-        let method = event_loop.extract_method_call(line);
-        assert!(method.is_some());
-
-        // Test non-call
-        let line = "let x = 42";
-        let func = event_loop.extract_function_call(line);
-        assert!(func.is_none());
+        assert!(event_loop.mcp_server().is_some());
+        let server = event_loop.mcp_server().unwrap();
+        let server_ref = server.blocking_read();
+        assert_eq!(server_ref.tool_count(), 4);
     }
+
+
 
     #[tokio::test]
     async fn test_verify_symbols_before_edit_pass() {

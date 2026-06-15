@@ -71,3 +71,29 @@ pub struct ChatResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
 }
+
+/// Streaming event from a chat stream
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum StreamEvent {
+    /// Content token received
+    Delta { content: String },
+    /// Tool call started
+    ToolCallStart { id: String, name: String },
+    /// Tool call argument chunk
+    ToolCallArgument { id: String, argument: String },
+    /// Tool call completed
+    ToolCallEnd { id: String },
+    /// Stream finished
+    Done { usage: Option<TokenUsage> },
+    /// Error during streaming
+    Error { message: String },
+}
+
+/// Token usage statistics
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}

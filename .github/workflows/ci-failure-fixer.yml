@@ -1,0 +1,163 @@
+name: Forge CI Failure Fixer
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix-failures:
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Forge
+        run: cargo build --release -p forge-cli
+
+      - name: Get CI failure info
+        id: failure
+        run: |
+          RUN_ID="${{ github.event.workflow_run.id }}"
+          BRANCH="${{ github.event.workflow_run.head_branch }}"
+
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Get failed job logs
+        id: logs
+        run: |
+          # Get the failed workflow run logs
+          RUN_ID="${{ steps.failure.outputs.run_id }}"
+
+          # Run cargo build and test to capture errors
+          BUILD_OUTPUT=$(cargo build 2>&1 || true)
+          TEST_OUTPUT=$(cargo test 2>&1 || true)
+          CLIPPY_OUTPUT=$(cargo clippy --workspace 2>&1 || true)
+          FMT_OUTPUT=$(cargo fmt -- --check 2>&1 || true)
+
+          echo "build_output<<BUILD_EOF" >> $GITHUB_OUTPUT
+          echo "$BUILD_OUTPUT" >> $GITHUB_OUTPUT
+          echo "BUILD_EOF" >> $GITHUB_OUTPUT
+
+          echo "test_output<<TEST_EOF" >> $GITHUB_OUTPUT
+          echo "$TEST_OUTPUT" >> $GITHUB_OUTPUT
+          echo "TEST_EOF" >> $GITHUB_OUTPUT
+
+          echo "clippy_output<<CLIPPY_EOF" >> $GITHUB_OUTPUT
+          echo "$CLIPPY_OUTPUT" >> $GITHUB_OUTPUT
+          echo "CLIPPY_EOF" >> $GITHUB_OUTPUT
+
+          echo "fmt_output<<FMT_EOF" >> $GITHUB_OUTPUT
+          echo "$FMT_OUTPUT" >> $GITHUB_OUTPUT
+          echo "FMT_EOF" >> $GITHUB_OUTPUT
+
+      - name: Analyze and fix failures
+        env:
+          FORGE_API_KEY: ${{ secrets.FORGE_API_KEY }}
+        run: |
+          cat <<PROMPT > /tmp/fix_prompt.md
+          The CI build failed. Analyze the errors and fix them.
+
+          Build errors:
+          ${{ steps.logs.outputs.build_output }}
+
+          Test failures:
+          ${{ steps.logs.outputs.test_output }}
+
+          Clippy warnings:
+          ${{ steps.logs.outputs.clippy_output }}
+
+          Format issues:
+          ${{ steps.logs.outputs.fmt_output }}
+
+          For each error:
+          1. Identify the root cause
+          2. Determine the fix
+          3. Apply the fix
+
+          Focus on:
+          - Compilation errors first
+          - Then test failures
+          - Then clippy warnings
+          - Then formatting issues
+
+          Be minimal - only change what's necessary to fix the errors.
+          PROMPT
+
+          ./target/release/forge exec --prompt "$(cat /tmp/fix_prompt.md)" 2>&1 || echo "Auto-fix failed"
+
+      - name: Verify fix compiles
+        id: verify
+        run: |
+          cargo build 2>&1 | tee /tmp/build_verify.txt
+          BUILD_EXIT=$?
+
+          cargo test 2>&1 | tee /tmp/test_verify.txt
+          TEST_EXIT=$?
+
+          echo "build_exit=$BUILD_EXIT" >> $GITHUB_OUTPUT
+          echo "test_exit=$TEST_EXIT" >> $GITHUB_OUTPUT
+
+      - name: Commit and push fix
+        if: steps.verify.outputs.build_exit == '0'
+        run: |
+          git config user.name "Forge Bot"
+          git config user.email "forge@bot.local"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: auto-fix CI failures [forge-bot]"
+          git push origin ${{ steps.failure.outputs.branch }}
+
+      - name: Create fix PR comment
+        if: steps.verify.outputs.build_exit == '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildVerify = '${{ steps.verify.outputs.build_exit }}';
+            const testVerify = '${{ steps.verify.outputs.test_exit }}';
+
+            let status = 'fixed';
+            if (buildVerify !== '0') status = 'build still failing';
+            else if (testVerify !== '0') status = 'tests still failing';
+
+            const body = `## Forge Auto-Fix
+
+            **Status:** ${status}
+            **Branch:** \`${{ steps.failure.outputs.branch }}\`
+
+            Forge has analyzed the CI failures and applied fixes. Please review the changes.
+
+            ${buildVerify === '0' ? '✅ Build passes' : '❌ Build still failing'}
+            ${testVerify === '0' ? '✅ Tests pass' : '❌ Tests still failing'}
+            `;
+
+            // Find the PR for this branch
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: '${{ steps.failure.outputs.branch }}',
+              state: 'open'
+            });
+
+            if (prs.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prs.data[0].number,
+                body: body
+              });
+            }

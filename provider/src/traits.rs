@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::{ChatResponse, Message};
+use crate::{ChatResponse, Message, StreamEvent};
 
 /// Abstract model provider interface
 #[async_trait]
@@ -12,6 +12,21 @@ pub trait ModelProvider: Send + Sync {
 
     /// Get the model name/version
     fn model(&self) -> &str;
+
+    /// Check if provider supports streaming
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+}
+
+/// Streaming model provider interface
+#[async_trait]
+pub trait StreamingProvider: ModelProvider {
+    /// Send a chat request and return a stream of events
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>>;
 }
 
 #[async_trait]

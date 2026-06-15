@@ -1,8 +1,8 @@
 //! Spawned MCP server subprocess management
 //!
-//! Handles spawning and communication with MCP server processes.
+//! Handles spawning and communication with MCP server processes via stdio.
 
-use super::protocol::JsonRpcRequest;
+use super::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -17,7 +17,6 @@ pub struct ServerProcess {
 }
 
 impl ServerProcess {
-    /// Spawn new MCP server subprocess
     pub async fn spawn(command: String, args: Vec<String>) -> Result<Self> {
         let mut child = Command::new(&command)
             .args(&args)
@@ -25,14 +24,8 @@ impl ServerProcess {
             .stdout(std::process::Stdio::piped())
             .spawn()?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("No stdin"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("No stdout"))?;
+        let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("No stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("No stdout"))?;
 
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
@@ -41,38 +34,68 @@ impl ServerProcess {
         })
     }
 
-    /// Send JSON-RPC request and wait for response
-    pub async fn send_and_recv(
-        &self,
-        req: &JsonRpcRequest,
-    ) -> Result<super::protocol::JsonRpcResponse> {
-        self.send(req).await?;
-        self.recv().await
+    pub async fn send_and_recv(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+        self.send_request(req).await?;
+        self.recv_response().await
     }
 
-    /// Send request (no response wait)
-    pub async fn send(&self, req: &JsonRpcRequest) -> Result<()> {
-        let json = serde_json::to_string(req)?;
+    pub async fn send_request(&self, req: &JsonRpcRequest) -> Result<()> {
         let mut stdin = self.stdin.lock().await;
+        let json = serde_json::to_string(req)?;
         stdin.write_all(json.as_bytes()).await?;
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
         Ok(())
     }
 
-    /// Receive response
-    pub async fn recv(&self) -> Result<super::protocol::JsonRpcResponse> {
+    pub async fn send_notification(&self, notif: &JsonRpcNotification) -> Result<()> {
+        let mut stdin = self.stdin.lock().await;
+        let json = serde_json::to_string(notif)?;
+        stdin.write_all(json.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
+    pub async fn recv_response(&self) -> Result<JsonRpcResponse> {
         let mut stdout = self.stdout.lock().await;
         let mut line = String::new();
         stdout.read_line(&mut line).await?;
-        let response: super::protocol::JsonRpcResponse = serde_json::from_str(&line)?;
+        if line.is_empty() {
+            return Err(anyhow::anyhow!("EOF from server"));
+        }
+        let response: JsonRpcResponse = serde_json::from_str(&line)?;
         Ok(response)
     }
 
-    /// Check if process is still running
     pub async fn is_running(&self) -> bool {
         let mut child = self.child.lock().await;
         child.try_wait().ok().flatten().is_none()
+    }
+
+    pub async fn kill(&self) -> Result<()> {
+        let mut child = self.child.lock().await;
+        child.kill().await?;
+        Ok(())
+    }
+
+    /// Create a mock process for testing (spawns cat for stdin/stdout)
+    #[cfg(test)]
+    pub(crate) async fn mock() -> Self {
+        let mut child = Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn mock process");
+
+        let stdin = child.stdin.take().expect("no stdin");
+        let stdout = child.stdout.take().expect("no stdout");
+
+        Self {
+            child: Arc::new(Mutex::new(child)),
+            stdin: Arc::new(Mutex::new(stdin)),
+            stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
+        }
     }
 }
 
@@ -81,17 +104,36 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_server_process_type_exists() {
-        // Just verify the type exists
-        // Empty test for now
-        // TODO: Add actual server process tests
+    async fn test_server_process_spawn_echo() {
+        let result = ServerProcess::spawn("echo".into(), vec!["test".into()]).await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn test_server_process_spawn_echo() {
-        // Test with a simple echo command
-        let result = ServerProcess::spawn("echo".to_string(), vec!["test".to_string()]).await;
-        // This might fail on some systems, so we just check it doesn't panic
-        let _ = result;
+    async fn test_server_process_send_request() {
+        let proc = ServerProcess::spawn("cat".into(), vec![]).await.unwrap();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(1),
+            method: "test".into(),
+            params: None,
+        };
+        let result = proc.send_request(&req).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_server_process_send_notification() {
+        let proc = ServerProcess::spawn("cat".into(), vec![]).await.unwrap();
+        let notif = JsonRpcNotification::new("test/notification", None);
+        let result = proc.send_notification(&notif).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_server_process_is_running() {
+        let proc = ServerProcess::spawn("echo".into(), vec!["test".into()]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!proc.is_running().await);
     }
 }

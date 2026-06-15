@@ -7,8 +7,8 @@ pub mod types;
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
 pub use openai::OpenAIProvider;
-pub use traits::ModelProvider;
-pub use types::{ChatResponse, Message, ToolCall, ToolResponse};
+pub use traits::{ModelProvider, StreamingProvider};
+pub use types::{ChatResponse, Message, StreamEvent, TokenUsage, ToolCall, ToolResponse};
 
 use std::sync::Arc;
 

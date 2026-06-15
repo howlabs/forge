@@ -1,24 +1,16 @@
-//! Extension system (v0.190.0)
+//! Extension system
 //!
-//! This crate will handle:
+//! This crate handles:
 //! - MCP client/server
+//! - ACP editor integration
 //! - Hooks system
 //! - Skills framework
-//! - Headless execution (forge exec)
-//! - Multi-provider support
+//! - Plugin registry
 //! - Observability
 
+pub mod acp;
 pub mod hooks;
 pub mod mcp;
 pub mod observability;
+pub mod plugins;
 pub mod skills;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_placeholder() {
-        // Placeholder test until v0.190.0
-        // Empty test for now
-        // TODO: Add actual tests
-    }
-}

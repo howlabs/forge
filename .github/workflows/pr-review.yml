@@ -1,0 +1,86 @@
+name: Forge PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Forge
+        run: cargo build --release -p forge-cli
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          echo "diff<<DIFF_EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "DIFF_EOF" >> $GITHUB_OUTPUT
+
+      - name: Get changed files
+        id: files
+        run: |
+          FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "files<<FILES_EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "FILES_EOF" >> $GITHUB_OUTPUT
+
+      - name: Run Forge PR Review
+        env:
+          FORGE_API_KEY: ${{ secrets.FORGE_API_KEY }}
+        run: |
+          cat <<PROMPT > /tmp/review_prompt.md
+          Review this pull request. Focus on:
+          1. Code quality and correctness
+          2. Security concerns
+          3. Performance issues
+          4. Test coverage
+          5. Documentation needs
+
+          Changed files:
+          ${{ steps.files.outputs.files }}
+
+          Diff:
+          ${{ steps.diff.outputs.diff }}
+
+          Provide a structured review with:
+          - Summary
+          - Issues found (severity: critical/warning/info)
+          - Suggestions
+          - Overall assessment (approve/request changes/needs discussion)
+          PROMPT
+
+          REVIEW=$(./target/release/forge exec --prompt "$(cat /tmp/review_prompt.md)" 2>&1 || echo "Review generation failed")
+
+          echo "## Forge PR Review" > /tmp/review.md
+          echo "" >> /tmp/review.md
+          echo "$REVIEW" >> /tmp/review.md
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: review
+            });

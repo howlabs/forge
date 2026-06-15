@@ -1,15 +1,16 @@
 //! OpenAI API provider implementation
 //!
-//! Provides ModelProvider trait implementation for OpenAI's GPT models.
+//! Provides ModelProvider and StreamingProvider trait implementations.
 
-use super::traits::ModelProvider;
-use super::types::{ChatResponse, Message, MessageRole, ToolCall};
+use super::traits::{ModelProvider, StreamingProvider};
+use super::types::{ChatResponse, Message, MessageRole, StreamEvent, ToolCall};
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 /// OpenAI API provider
 pub struct OpenAIProvider {
@@ -153,6 +154,105 @@ impl ModelProvider for OpenAIProvider {
 
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+}
+
+#[async_trait]
+impl StreamingProvider for OpenAIProvider {
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        let openai_messages = Self::convert_messages(messages);
+        let url = self
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1/chat/completions")
+            .replace("chat/completions", "chat/completions");
+
+        let response = self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "model": self.model,
+                "messages": openai_messages,
+                "stream": true
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            return Err(anyhow::anyhow!("OpenAI streaming error: {}", error_text));
+        }
+
+        let (tx, rx) = mpsc::channel(100);
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut bytes = response.bytes_stream();
+
+            use futures_util::StreamExt;
+            while let Some(chunk) = bytes.next().await {
+                match chunk {
+                    Ok(data) => {
+                        buffer.push_str(&String::from_utf8_lossy(&data));
+                        while let Some(line_end) = buffer.find('\n') {
+                            let line = buffer[..line_end].trim().to_string();
+                            buffer = buffer[line_end + 1..].to_string();
+
+                            if line.is_empty() || line == "data: [DONE]" {
+                                if line == "data: [DONE]" {
+                                    let _ = tx.send(StreamEvent::Done { usage: None }).await;
+                                }
+                                continue;
+                            }
+
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                                    if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
+                                        if let Some(choice) = choices.first() {
+                                            if let Some(delta) = choice.get("delta") {
+                                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                                    let _ = tx.send(StreamEvent::Delta { content: content.to_string() }).await;
+                                                }
+                                                if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                                    for tc in tool_calls {
+                                                        if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                                                            if let Some(func) = tc.get("function") {
+                                                                let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                                                let _ = tx.send(StreamEvent::ToolCallStart { id: id.to_string(), name: name.to_string() }).await;
+                                                            }
+                                                        }
+                                                        if let Some(func) = tc.get("function") {
+                                                            if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                                                let _ = tx.send(StreamEvent::ToolCallArgument { id: tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(), argument: args.to_string() }).await;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
     }
 }
 

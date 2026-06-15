@@ -1,0 +1,116 @@
+name: Forge Issue to Branch
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  create-branch:
+    if: contains(github.event.label.name, 'forge:') || contains(github.event.label.name, 'good-first-issue') || contains(github.event.label.name, 'help-wanted')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Forge
+        run: cargo build --release -p forge-cli
+
+      - name: Get issue info
+        id: issue
+        run: |
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_BODY="${{ github.event.issue.body }}"
+
+          # Sanitize title for branch name
+          BRANCH_NAME="issue/${ISSUE_NUM}-$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | head -c 50)"
+
+          echo "number=$ISSUE_NUM" >> $GITHUB_OUTPUT
+          echo "title<<TITLE_EOF" >> $GITHUB_OUTPUT
+          echo "$ISSUE_TITLE" >> $GITHUB_OUTPUT
+          echo "TITLE_EOF" >> $GITHUB_OUTPUT
+          echo "body<<BODY_EOF" >> $GITHUB_OUTPUT
+          echo "$ISSUE_BODY" >> $GITHUB_OUTPUT
+          echo "BODY_EOF" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create branch
+        run: |
+          git config user.name "Forge Bot"
+          git config user.email "forge@bot.local"
+          git checkout -b ${{ steps.issue.outputs.branch }}
+
+      - name: Analyze issue and plan
+        env:
+          FORGE_API_KEY: ${{ secrets.FORGE_API_KEY }}
+        run: |
+          cat <<PROMPT > /tmp/issue_prompt.md
+          Analyze this GitHub issue and create a plan to resolve it.
+
+          Issue #${{ steps.issue.outputs.number }}: ${{ steps.issue.outputs.title }}
+
+          ${{ steps.issue.outputs.body }}
+
+          Based on the codebase at the current commit, create a plan that includes:
+          1. What files need to be modified
+          2. What changes are needed
+          3. Any new files that should be created
+          4. Tests that should be added/modified
+
+          Output a JSON plan with this structure:
+          {
+            "summary": "Brief summary",
+            "files_to_modify": [{"path": "path", "change": "description"}],
+            "files_to_create": [{"path": "path", "content_summary": "description"}],
+            "tests_needed": ["description of tests"]
+          }
+          PROMPT
+
+          PLAN=$(./target/release/forge exec --prompt "$(cat /tmp/issue_prompt.md)" 2>&1 || echo '{"summary":"Analysis failed"}')
+          echo "$PLAN" > /tmp/plan.json
+
+      - name: Create plan comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('/tmp/plan.json', 'utf8');
+            const branch = '${{ steps.issue.outputs.branch }}';
+
+            const body = `## Forge Issue Analysis
+
+            **Branch created:** \`${branch}\`
+
+            ### Plan
+            ${plan}
+
+            ### Next Steps
+            This issue has been analyzed and a branch has been created. The plan above outlines the approach to resolve this issue.
+
+            To work on this issue locally:
+            \`\`\`bash
+            git fetch origin
+            git checkout ${branch}
+            forge exec --prompt "Implement the plan for issue #${{ steps.issue.outputs.number }}"
+            \`\`\`
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Push branch
+        run: |
+          git push origin ${{ steps.issue.outputs.branch }}
