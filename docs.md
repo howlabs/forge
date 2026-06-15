@@ -3,6 +3,8 @@
 
 **Tài liệu build hợp nhất** — gom toàn bộ nghiên cứu + audit + xu hướng + blueprint thành MỘT nguồn duy nhất để bắt tay xây **Forge** cùng Claude. Đọc top-down: hiểu bối cảnh → quyết định kiến trúc → lo trình build theo phiên bản.
 
+> ⚠️ **Tính chất tài liệu (6/2026):** đây là tài liệu **nghiên cứu/thiết kế tham chiếu**, *không phải* mô tả thực tế mã nguồn. Phần lớn mục 6–10 là **định hướng khát vọng**, chưa khớp 100% với code. Nguồn chân lý duy nhất là code (`forge-cli/src/main.rs`, `forge.toml`, các crate) và `README.md`/`CURRENT_STATUS.md`. Cụ thể: provider mặc định thực tế là **Z.AI / glm-5.1** (không phải Anthropic như mục 8), và `forge.toml` thực tế không có các section `[engine]`/`[agents]`.
+
 </aside>
 
 > **Forge** = CLI coding agent mã nguồn mở, viết bằng **Rust** (1 static binary), **model-agnostic + local-first**, **context engine ngữ nghĩa**, **đa agent song song** với long-horizon. Mục tiêu: nhẹ hơn Codex, thông minh ngữ cảnh như Augment, song song như Droid/Amp, mở như OpenHands.
@@ -167,10 +169,40 @@ flowchart TD
 
 ## 8. Cấu hình `forge.toml`
 
+Đây là **trạng thái mục tiêu khát vọng**. `forge.toml` thực tế hiện tại đơn giản
+hơn nhiều (xem file `forge.toml` ở gốc repo). Đoạn dưới mô tả cấu hình đầy đủ
+dự kiến theo roadmap, **không phải** nội dung file hiện tại.
+
+**`forge.toml` thực tế (commit hiện tại):**
+
 ```toml
-# forge.toml
 [provider]
-default = "anthropic"
+# Mặc định: Z.AI với GLM 5.1 (nguồn chân lý = code trong forge-cli/src/main.rs)
+type = "zai"
+model = "glm-5.1"
+api_key_env = "ZAI_API_KEY"
+
+[sandbox]
+network = "off"
+project_path = "."
+
+[context]
+agents_file = "AGENTS.md"
+
+[verify]
+enabled = true
+commands = ["cargo test", "cargo build"]
+
+[logging]
+level = "info"
+```
+
+**`forge.toml` mục tiêu (khát vọng, theo roadmap):**
+
+```toml
+# forge.toml (mục tiêu)
+[provider]
+default = "zai"          # thực tế hiện tại; roadmap: có fallback chain
 fallback = ["openai", "local"]
 
 [engine]

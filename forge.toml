@@ -26,7 +26,9 @@ network = "off"
 project_path = "."
 
 [context]
-# v0.100.0: AGENTS.md only (will add tree-sitter + vector store in v0.130.0)
+# The context crate already implements tree-sitter indexing, a knowledge graph,
+# and a local vector store (see context/src/), but the live event loop still
+# loads AGENTS.md as the primary context source by default.
 agents_file = "AGENTS.md"
 
 [verify]
