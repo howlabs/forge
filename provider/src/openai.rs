@@ -242,11 +242,13 @@ mod tests {
         assert!(response.tool_calls.is_empty());
     }
 
-    // Integration test with real Z.AI API
-    // Run with: cargo test --package forge-provider test_zai_real_api -- --ignored
-    // Requires: ZAI_API_KEY environment variable
+    // reason: this test exercises a live LLM provider endpoint (Z.AI / GLM) and
+    // therefore requires network access plus a valid ZAI_API_KEY. It is gated
+    // behind the `integration` cargo feature and ignored by default so that
+    // `cargo test --workspace` stays fully offline. Run it explicitly with:
+    //     cargo test -p provider --features integration test_zai_real_api -- --ignored
     #[tokio::test]
-    #[ignore]
+    #[cfg_attr(not(feature = "integration"), ignore)]
     async fn test_zai_real_api() {
         let api_key = std::env::var("ZAI_API_KEY")
             .expect("Set ZAI_API_KEY environment variable to run this test");

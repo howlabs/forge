@@ -54,11 +54,31 @@ pub struct AgentsDiscovery {
 /// Load AGENTS.md by walking up from `start_dir` to filesystem root.
 /// Returns content of the nearest AGENTS.md found, or None.
 pub fn load_agents_md(start_dir: &Path) -> Option<String> {
+    load_agents_md_within(start_dir, None)
+}
+
+/// Load AGENTS.md by walking up from `start_dir`, stopping after `boundary`
+/// (inclusive). If `boundary` is `None`, walks all the way to the filesystem
+/// root — the historical behaviour used by production callers.
+///
+/// The bounded form exists so the "no AGENTS.md found" case can be tested
+/// deterministically: an unbounded walk returns `Some` whenever *any* ancestor
+/// directory up to the FS root happens to contain an `AGENTS.md` (e.g. a user
+/// profile directory on a shared machine), which makes a plain
+/// `assert!(load_agents_md(tmp).is_none())` host-dependent and flaky.
+pub fn load_agents_md_within(start_dir: &Path, boundary: Option<&Path>) -> Option<String> {
     let mut current = start_dir.to_path_buf();
     loop {
         let candidate = current.join("AGENTS.md");
         if candidate.exists() {
             return std::fs::read_to_string(&candidate).ok();
+        }
+
+        // Honour the boundary: stop once we've inspected the boundary dir itself.
+        if let Some(b) = boundary {
+            if current == b {
+                return None;
+            }
         }
 
         match current.parent() {
@@ -252,9 +272,14 @@ Local agents"#,
 
     #[test]
     fn test_agents_md_not_found_returns_none() {
+        // reason: `load_agents_md` walks all the way to the filesystem root, so on
+        // a shared host that has an AGENTS.md somewhere up the tree (e.g. the user
+        // profile dir) it correctly returns `Some`. To test the "not found" branch
+        // deterministically we use the bounded overload and stop the walk at the
+        // temp dir itself, which we know contains no AGENTS.md.
         let temp_dir = tempfile::tempdir().unwrap();
 
-        let content = load_agents_md(temp_dir.path());
+        let content = load_agents_md_within(temp_dir.path(), Some(temp_dir.path()));
 
         assert!(content.is_none());
     }

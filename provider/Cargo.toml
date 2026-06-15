@@ -12,3 +12,12 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
 async-trait = "0.1"
+
+[features]
+default = []
+# `integration` enables tests that hit a real LLM provider API. These tests are
+# NOT run by `cargo test --workspace` (the default, fully-offline path). Run
+# them explicitly with:
+#     cargo test -p provider --features integration -- --ignored
+# Requirements: a valid ZAI_API_KEY environment variable and network access.
+integration = []
