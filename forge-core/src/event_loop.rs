@@ -3,7 +3,7 @@ use context::{ContextEngine, ContextIndex};
 use forge_ext::mcp::{McpClient, McpTool};
 use provider::{Message, ModelProvider, ToolCall};
 use sandbox::Sandbox;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -175,16 +175,17 @@ impl<P: ModelProvider> EventLoop<P> {
 
     fn get_system_prompt(&self) -> String {
         // Load AGENTS.md if it exists, otherwise use default
-        let base = match self.context.load_agents_md() {
-            Ok(content) => content,
-            Err(_) => self.default_system_prompt(),
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let base = match context::agents::load_agents_md(&root) {
+            Some(content) => content,
+            None => self.default_system_prompt(),
         };
 
-        let context_chunks = self.context.query_context(&self.task, 5);
+        let context_chunks = self.context.retrieve(&self.task, 5).unwrap_or_default();
         let context_section = if !context_chunks.is_empty() {
             let chunks_text = context_chunks
                 .iter()
-                .map(|chunk| format!("// {}\n{}", chunk.file.display(), chunk.text))
+                .map(|ctx| format!("// {}\n{}", ctx.chunk.file.display(), ctx.chunk.text))
                 .collect::<Vec<_>>()
                 .join("\n\n---\n\n");
             format!(
@@ -401,6 +402,20 @@ mod tests {
     impl context::ContextIndex for MockContextIndex {
         fn upsert_file(&mut self, _path: &std::path::Path, _src: &str) {}
         fn remove_file(&mut self, _path: &std::path::Path) {}
+        fn resolve_symbol(&self, name: &str) -> Option<context::symbols::Symbol> {
+            if name == "existing_function" {
+                Some(context::symbols::Symbol {
+                    name: "existing_function".to_string(),
+                    kind: context::symbols::SymbolKind::Function,
+                    start_line: 1,
+                    end_line: 1,
+                    file: std::path::PathBuf::from("lib.rs"),
+                    signature: String::new(),
+                })
+            } else {
+                None
+            }
+        }
     }
     use forge_ext::mcp::McpTool;
     use provider::anthropic::AnthropicProvider;

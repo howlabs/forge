@@ -42,11 +42,11 @@ use crate::symbols::{parse_symbols, Symbol, SymbolKind};
 /// `SymbolId(0)` is reserved and never returned by any API.  Real
 /// symbols are assigned ids starting at 1 in the order they are
 /// inserted by [`KnowledgeGraph::add_file`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct SymbolId(pub u32);
 
 /// Kind of relationship between two symbols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EdgeKind {
     /// A directly calls B (a function/method invokes another).
     Calls,
@@ -84,18 +84,62 @@ impl EdgeKind {
 /// * `adj` — `(from, kind) → sorted set of `to` ids.
 /// * `files` — list of file paths already indexed (used for diagnostics
 ///   and for future re-indexing; currently the graph is append-only).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct KnowledgeGraph {
     symbols: Vec<Option<Symbol>>,
     by_name: HashMap<String, BTreeSet<SymbolId>>,
+    #[serde(with = "adj_serde")]
     adj: HashMap<(SymbolId, EdgeKind), BTreeSet<SymbolId>>,
     files: Vec<PathBuf>,
+}
+
+mod adj_serde {
+    use super::{SymbolId, EdgeKind};
+    use std::collections::{HashMap, BTreeSet};
+    use serde::{Serialize, Serializer, Deserialize, Deserializer};
+
+    pub fn serialize<S>(adj: &HashMap<(SymbolId, EdgeKind), BTreeSet<SymbolId>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let vec: Vec<_> = adj.iter().collect();
+        vec.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<(SymbolId, EdgeKind), BTreeSet<SymbolId>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec: Vec<((SymbolId, EdgeKind), BTreeSet<SymbolId>)> = Vec::deserialize(deserializer)?;
+        Ok(vec.into_iter().collect())
+    }
 }
 
 impl KnowledgeGraph {
     /// Build a new, empty knowledge graph.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load the graph from disk.
+    pub fn load(path: &Path) -> Result<Self> {
+        let data = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let graph: Self = serde_json::from_str(&data)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        Ok(graph)
+    }
+
+    /// Save the graph to disk atomically.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let data = serde_json::to_string(self)
+            .with_context(|| format!("serializing graph"))?;
+        let temp_path = path.with_extension("tmp");
+        std::fs::write(&temp_path, data)
+            .with_context(|| format!("writing temp file {}", temp_path.display()))?;
+        std::fs::rename(&temp_path, path)
+            .with_context(|| format!("renaming to {}", path.display()))?;
+        Ok(())
     }
 
     /// Number of symbols currently in the graph.
@@ -210,14 +254,16 @@ impl KnowledgeGraph {
 
         for id in &ids_to_remove {
             // Remove from by_name
-            if let Some(sym) = self.symbol(*id) {
-                if let Some(set) = self.by_name.get_mut(&sym.name) {
+            let sym_name = if let Some(sym) = self.symbol(*id) {
+                Some(sym.name.clone())
+            } else {
+                None
+            };
+            if let Some(name) = sym_name {
+                if let Some(set) = self.by_name.get_mut(&name) {
                     set.remove(id);
                     if set.is_empty() {
-                        // ponytail: YAGNI - we don't strictly need to remove empty sets,
-                        // but it's cleaner.
-                        let name_to_remove = sym.name.clone();
-                        self.by_name.remove(&name_to_remove);
+                        self.by_name.remove(&name);
                     }
                 }
             }
@@ -308,11 +354,18 @@ impl KnowledgeGraph {
             }
         }
 
+        // Collect local variable names to filter them out of references.
+        let mut locals = std::collections::HashSet::new();
+        Self::collect_locals(language, tree.root_node(), source, &mut locals);
+
         // Collect identifiers with the line they appear on.
         // `tree_sitter` `Node`s are valid for the lifetime of the
         // tree; we extract the text we need before walking.
         let mut refs: Vec<(usize, String, /* is_call */ bool)> = Vec::new();
         Self::collect_identifiers(language, tree.root_node(), source, &mut refs);
+
+        // Filter out locals to prevent hallucinated edges to global functions with the same name.
+        refs.retain(|(_, name, _)| !locals.contains(name));
 
         // Collapse duplicate (line, name) entries to a single record,
         // preferring `is_call = true` when both forms are seen for the
@@ -391,9 +444,28 @@ impl KnowledgeGraph {
                 None => continue,
             };
 
-            let targets = self.find_by_name(&name);
+            let mut targets = self.find_by_name(&name);
             if targets.is_empty() {
                 continue;
+            }
+
+            // Qualified resolution / Simple scoping (Ponytail approach):
+            // If any target is in the SAME file as the owner, it's almost certainly
+            // the intended target (shadowing global symbols of the same name).
+            // Filter the targets to only local ones if any exist.
+            for owner in &candidates {
+                if let Some(owner_sym) = self.symbol(*owner) {
+                    let owner_file = owner_sym.file.clone();
+                    let same_file_targets: Vec<SymbolId> = targets
+                        .iter()
+                        .copied()
+                        .filter(|&t| self.symbol(t).map_or(false, |s| s.file == owner_file))
+                        .collect();
+                    if !same_file_targets.is_empty() {
+                        targets = same_file_targets;
+                        break;
+                    }
+                }
             }
 
             for owner in candidates {
@@ -476,11 +548,76 @@ impl KnowledgeGraph {
                     Self::push_identifier_from(node, source, line, out, false);
                 }
             }
+            Lang::Go | Lang::Java | Lang::Cpp => {
+                if kind == "call_expression" || kind == "method_invocation" {
+                    if let Some(func) = node.child_by_field_name("function").or_else(|| node.child_by_field_name("name")) {
+                        Self::push_identifier_from(func, source, line, out, true);
+                    }
+                } else if kind == "identifier" {
+                    Self::push_identifier_from(node, source, line, out, false);
+                }
+            }
         }
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             Self::collect_identifiers(language, child, source, out);
+        }
+    }
+
+    fn collect_locals(
+        language: Lang,
+        node: Node,
+        source: &str,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        let kind = node.kind();
+        match language {
+            Lang::Rust => {
+                if kind == "let_declaration" {
+                    if let Some(pat) = node.child_by_field_name("pattern") {
+                        Self::extract_identifiers_from_pattern(pat, source, out);
+                    }
+                }
+            }
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+                if kind == "lexical_declaration" || kind == "variable_declaration" {
+                    Self::extract_identifiers_from_pattern(node, source, out);
+                }
+            }
+            Lang::Python => {
+                if kind == "assignment" {
+                    if let Some(left) = node.child_by_field_name("left") {
+                        Self::extract_identifiers_from_pattern(left, source, out);
+                    }
+                }
+            }
+            Lang::Go => {
+                if kind == "short_var_declaration" || kind == "var_declaration" {
+                    Self::extract_identifiers_from_pattern(node, source, out);
+                }
+            }
+            Lang::Java | Lang::Cpp => {
+                if kind == "local_variable_declaration" || kind == "declaration" {
+                    Self::extract_identifiers_from_pattern(node, source, out);
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            Self::collect_locals(language, child, source, out);
+        }
+    }
+
+    fn extract_identifiers_from_pattern(node: Node, source: &str, out: &mut std::collections::HashSet<String>) {
+        if node.kind() == "identifier" {
+            let text = crate::symbols::node_text(node, source).to_string();
+            out.insert(text);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            Self::extract_identifiers_from_pattern(child, source, out);
         }
     }
 
@@ -680,6 +817,43 @@ mod tests {
         let g = KnowledgeGraph::new();
         assert!(g.symbol(SymbolId(0)).is_none());
         assert!(g.neighbors(SymbolId(0), EdgeKind::Calls).is_empty());
+    }
+
+    #[test]
+    fn graph_persistence_round_trip() {
+        let src = "fn target() {}\nfn caller() { target(); }\n";
+        let mut g = KnowledgeGraph::new();
+        g.add_file(&PathBuf::from("a.rs"), src, &registry())
+            .unwrap();
+        
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph.json");
+        
+        g.save(&path).unwrap();
+        let loaded = KnowledgeGraph::load(&path).unwrap();
+        
+        assert_eq!(g.symbol_count(), loaded.symbol_count());
+        let caller = *g.find_by_name("caller").first().unwrap();
+        let target = *g.find_by_name("target").first().unwrap();
+        
+        let calls = loaded.neighbors(caller, EdgeKind::Calls);
+        assert!(calls.contains(&target));
+    }
+
+    #[test]
+    fn local_variables_are_not_linked_as_globals() {
+        let src = "fn global_func() {}\nfn caller() {\n    let global_func = 1;\n    global_func;\n}\n";
+        let mut g = KnowledgeGraph::new();
+        g.add_file(&PathBuf::from("a.rs"), src, &registry())
+            .unwrap();
+
+        let global = *g.find_by_name("global_func").first().unwrap();
+        let caller = *g.find_by_name("caller").first().unwrap();
+
+        // The identifier `global_func` inside `caller` matches the local variable,
+        // so it should NOT create a reference to the global `global_func`.
+        let refs = g.neighbors(caller, EdgeKind::References);
+        assert!(!refs.contains(&global), "local variable should not link to global function");
     }
 
     #[test]

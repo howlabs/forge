@@ -11,6 +11,8 @@ pub mod lang;
 pub mod symbols;
 pub mod vector;
 
+pub use engine::ContextEngine;
+pub use symbols::{Symbol, SymbolKind};
 // ponytail: deleted 1400 lines of legacy dual implementations. The only shared contract is this trait.
 // query() and resolve_symbol() were unused, removed per YAGNI.
 
@@ -21,4 +23,7 @@ pub trait ContextIndex: Send + Sync {
 
     /// Remove a file from the index
     fn remove_file(&mut self, path: &Path);
+
+    /// Resolve a symbol by name
+    fn resolve_symbol(&self, name: &str) -> Option<crate::symbols::Symbol>;
 }

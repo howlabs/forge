@@ -225,12 +225,13 @@ mod tests {
         }
     }
     impl context::ContextIndex for MockContextIndex {
-        fn upsert_file(&mut self, path: &std::path::Path, _src: &str) {
+        fn upsert_file(&mut self, path: &Path, _src: &str) {
             self.upserts.insert(path.to_path_buf());
         }
-        fn remove_file(&mut self, path: &std::path::Path) {
+        fn remove_file(&mut self, path: &Path) {
             self.removes.insert(path.to_path_buf());
         }
+        fn resolve_symbol(&self, _name: &str) -> Option<context::symbols::Symbol> { None }
     }
     use std::fs::{self, File};
     use std::io::Write;
@@ -270,7 +271,7 @@ mod tests {
             .unwrap();
 
         // Verify file was indexed
-        let locked_index = index.lock().await;
+        let _locked_index = index.lock().await;
         // The mock must be downcasted to check state
         // wait, we can't downcast easily behind the Arc<Mutex<dyn ContextIndex>> without Any
         // Since this is just a unit test, we can just assume it succeeded if no error was returned,
@@ -296,7 +297,7 @@ mod tests {
             .unwrap();
 
         // Verify file was removed from index
-        let locked_index = index.lock().await;
+        let _locked_index = index.lock().await;
         // Same here, just verifying it didn't error.
     }
 }

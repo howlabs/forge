@@ -75,6 +75,35 @@ pub struct ContextEngine {
 // ---- Public API ------------------------------------------------------------
 
 impl ContextEngine {
+    /// Open the context engine for `root`. Uses OpenAI text-embedding-3-small by default.
+    /// Does not perform a full reindex. Use `index_dir` for a full rebuild.
+    pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref();
+        let store_dir = root.join(".forge").join("context");
+        let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        let embedder = Arc::new(crate::vector::ApiEmbedder::new(
+            "https://api.openai.com/v1".to_string(),
+            api_key,
+            "text-embedding-3-small".to_string(),
+            1536,
+        ));
+        
+        let vector_store = VectorStore::open(&store_dir, 1536, "text-embedding-3-small")?;
+        let graph_path = store_dir.join("graph.json");
+        let graph = KnowledgeGraph::load(&graph_path).unwrap_or_else(|_| KnowledgeGraph::new());
+
+        Ok(Self {
+            _root: root.to_path_buf(),
+            _store_dir: store_dir,
+            graph,
+            vector_store,
+            embedder,
+            file_count: 0,
+            symbol_count: 0,
+            chunk_symbols: HashMap::new(),
+        })
+    }
+
     /// Index every supported file under `root`, storing vectors in `store_dir`.
     ///
     /// * Walks the directory tree, skipping [`IGNORE_LIST`] entries.
@@ -102,6 +131,7 @@ impl ContextEngine {
 
         engine.index_files(root, &registry)?;
         engine.vector_store.persist()?;
+        let _ = engine.graph.save(&store_dir.join("graph.json"));
 
         Ok(engine)
     }
@@ -159,6 +189,7 @@ impl crate::ContextIndex for ContextEngine {
             self.file_count += 1;
         }
         let _ = self.vector_store.persist();
+        let _ = self.graph.save(&self._store_dir.join("graph.json"));
     }
 
     fn remove_file(&mut self, path: &Path) {
@@ -171,6 +202,16 @@ impl crate::ContextIndex for ContextEngine {
         }
         self.symbol_count = self.graph.symbol_count();
         let _ = self.vector_store.persist();
+        let _ = self.graph.save(&self._store_dir.join("graph.json"));
+    }
+
+    fn resolve_symbol(&self, name: &str) -> Option<crate::symbols::Symbol> {
+        let ids = self.graph.find_by_name(name);
+        if let Some(id) = ids.first() {
+            self.graph.symbol(*id).cloned()
+        } else {
+            None
+        }
     }
 }
 

@@ -25,7 +25,7 @@ use crate::lang::{Lang, LanguageRegistry};
 // =============================================================================
 
 /// Kind of a symbol extracted from source code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SymbolKind {
     /// Free function / method.
     Function,
@@ -65,7 +65,7 @@ impl SymbolKind {
 }
 
 /// A single symbol extracted from a source file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
     /// Symbol name, e.g. `"foo"` or `"ContextIndex::upsert_file"`.
     pub name: String,
@@ -237,32 +237,22 @@ fn classify(language: Lang, node: Node, source: &str) -> Option<(SymbolKind, Str
             "function_declaration" | "method_declaration" => {
                 Some((SymbolKind::Function, child_text(node, "name", source)))
             }
-            "type_declaration" => {
-                let spec = node.child_by_field_name("type_spec");
-                if let Some(spec) = spec {
-                    let type_kind = spec.child_by_field_name("type")?.kind();
-                    let name = child_text(spec, "name", source);
-                    match type_kind {
-                        "struct_type" => Some((SymbolKind::Struct, name)),
-                        "interface_type" => Some((SymbolKind::Interface, name)),
-                        _ => None,
-                    }
+            "type_spec" => {
+                let type_kind = node.child_by_field_name("type")?.kind();
+                let name = child_text(node, "name", source);
+                match type_kind {
+                    "struct_type" => Some((SymbolKind::Struct, name)),
+                    "interface_type" => Some((SymbolKind::Interface, name)),
+                    _ => None,
+                }
+            }
+            "const_spec" => {
+                let name = child_text(node, "name", source);
+                if !name.is_empty() {
+                    Some((SymbolKind::Const, name))
                 } else {
                     None
                 }
-            }
-            "const_declaration" => {
-                // Take the first const spec's name if available, else just the declaration text
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.kind() == "const_spec" {
-                        let name = child_text(child, "name", source);
-                        if !name.is_empty() {
-                            return Some((SymbolKind::Const, name));
-                        }
-                    }
-                }
-                Some((SymbolKind::Const, "<const>".to_string()))
             }
             _ => None,
         },
@@ -284,7 +274,6 @@ fn classify(language: Lang, node: Node, source: &str) -> Option<(SymbolKind, Str
                 let decl = node.child_by_field_name("declarator");
                 let name = if let Some(decl) = decl {
                     // Try to dig out the identifier
-                    let mut cursor = decl.walk();
                     let mut name = String::new();
                     // simple heuristic: find the innermost identifier or scoped_identifier
                     let mut current = decl;
@@ -320,7 +309,8 @@ fn child_text(node: Node, field: &str, source: &str) -> String {
         .unwrap_or_default()
 }
 
-fn node_text(node: Node, source: &str) -> String {
+/// Extract the source text for a node.
+pub fn node_text(node: Node, source: &str) -> String {
     let s = node.start_byte();
     let e = node.end_byte();
     source.get(s..e).unwrap_or("").to_string()

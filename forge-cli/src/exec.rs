@@ -3,7 +3,7 @@
 //! Provides non-interactive execution with machine-readable output.
 
 use anyhow::{Context, Result};
-use provider::{AnthropicProvider, GeminiProvider, LocalProvider, ModelProvider, OpenAIProvider};
+use provider::{AnthropicProvider, GeminiProvider, ModelProvider, OpenAIProvider};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;

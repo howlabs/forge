@@ -4,7 +4,6 @@ use context::ContextEngine;
 use forge_tui::{SimpleTui, TuiConfig};
 use provider::anthropic::AnthropicProvider;
 use provider::gemini::GeminiProvider;
-use provider::local::LocalProvider;
 use provider::openai::OpenAIProvider;
 use provider::ModelProvider;
 use sandbox::Sandbox;
