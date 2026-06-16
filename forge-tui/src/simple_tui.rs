@@ -400,7 +400,7 @@ impl SimpleTui {
                         key
                     };
                     
-                    if key_resolved.is_empty() && provider != "mock" {
+                    if key_resolved.is_empty() && provider != "mock" && provider != "local" {
                         self.add_entry(ConversationEntry::System(format!(
                             "Error: No API key resolved for provider '{}'.", provider
                         )));
@@ -693,7 +693,7 @@ impl SimpleTui {
                     SlashCommand::Model { model } => {
                         if let Some(info) = provider::MODEL_CATALOG.iter().find(|m| m.model == model) {
                             let key = resolve_api_key(info.provider, None);
-                            if key.is_empty() && info.provider != "mock" {
+                            if key.is_empty() && info.provider != "mock" && info.provider != "local" {
                                 self.add_entry(ConversationEntry::System(format!(
                                     "Error: API key not found for provider '{}'. Please set the environment variable.",
                                     info.provider
@@ -761,7 +761,7 @@ impl SimpleTui {
                             });
                             
                             let key = resolve_api_key(&provider_lower, api_key);
-                            if key.is_empty() && provider_lower != "mock" {
+                            if key.is_empty() && provider_lower != "mock" && provider_lower != "local" {
                                 self.add_entry(ConversationEntry::System(format!(
                                     "Error: No API key resolved for provider '{}'. Please pass it or set the environment variable.",
                                     provider
@@ -1104,6 +1104,8 @@ impl SimpleTui {
                         | SlashCommand::Theme { .. }
                         | SlashCommand::Model { .. }
                         | SlashCommand::Diff { .. }
+                        | SlashCommand::Connect { .. }
+                        | SlashCommand::Agents { .. }
                 )
             } else {
                 false
@@ -1604,7 +1606,7 @@ impl SimpleTui {
                 )
                 .style(default_style);
             f.render_widget(input_paragraph, left_chunks[2]);
-            if self.focus == Focus::Input && !self.agent_running {
+            if self.focus == Focus::Input && !self.agent_running && !self.connect_popup.active {
                 f.set_cursor(left_chunks[2].x + self.cursor as u16 + 1, left_chunks[2].y + 1);
             }
         }
@@ -1915,6 +1917,12 @@ impl SimpleTui {
         let instructions_paragraph = Paragraph::new(instructions)
             .alignment(ratatui::layout::Alignment::Center);
         f.render_widget(instructions_paragraph, chunks[2]);
+        
+        if self.connect_popup.active_field == ConnectPopupField::ApiKey {
+            let cursor_x = chunks[1].x + self.connect_popup.api_key.len() as u16 + 1;
+            let cursor_y = chunks[1].y + 1;
+            f.set_cursor(cursor_x, cursor_y);
+        }
     }
 
     fn update_autocomplete_options(&mut self) {
@@ -1970,6 +1978,7 @@ impl SimpleTui {
                 "/context list",
                 "/agents list",
                 "/agents kill ",
+                "/agents toggle",
                 "/resume ",
                 "/diff ",
                 "/plan",
@@ -1978,6 +1987,7 @@ impl SimpleTui {
                 "/theme dark",
                 "/theme light",
                 "/theme safe",
+                "/connect ",
                 "/help",
             ];
 
@@ -2352,6 +2362,15 @@ mod tests {
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
         assert_eq!(tui.queued_messages, vec!["normal prompt".to_string()]); // queued!
+
+        // /connect is a local command, so it should NOT be queued
+        tui.input = "/connect".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+        
+        assert!(tui.connect_popup.active); // popup opened immediately
+        assert_eq!(tui.queued_messages.len(), 1); // no new items queued
     }
 
     #[tokio::test]
