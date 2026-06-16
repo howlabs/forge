@@ -1624,49 +1624,100 @@ impl SimpleTui {
         let mut in_code_block = false;
 
         for entry in &self.conversation {
-            let base_color = match entry {
-                ConversationEntry::User(_) => Color::Cyan,
-                ConversationEntry::Assistant(_) => Color::Green,
-                ConversationEntry::System(_) => Color::Yellow,
-                ConversationEntry::ToolCall { .. } => Color::Magenta,
-                ConversationEntry::Diff { .. } => Color::Yellow,
-                ConversationEntry::VerifyResult { passed, .. } => if *passed { Color::Green } else { Color::Red },
-            };
-
-            let text = match entry {
-                ConversationEntry::User(text) => format!("You: {}", text),
-                ConversationEntry::Assistant(text) => format!("Forge: {}", text),
-                ConversationEntry::System(text) => format!("System: {}", text),
-                ConversationEntry::ToolCall { name, result } => format!("[tool: {}] {}", name, result),
-                ConversationEntry::Diff { path, old_text, new_text } => format!("[diff: {}]\n- {}\n+ {}", path, old_text, new_text),
-                ConversationEntry::VerifyResult { passed, logs } => {
-                    let prefix = if *passed { "[✓ Passed]" } else { "[✗ Failed]" };
-                    format!("{} {}", prefix, logs)
+            let (label_span, text_color) = match entry {
+                ConversationEntry::User(_) => (
+                    Span::styled(" 👤 YOU ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                    Color::Cyan
+                ),
+                ConversationEntry::Assistant(_) => (
+                    Span::styled(" 🤖 FORGE ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                    Color::Green
+                ),
+                ConversationEntry::System(_) => (
+                    Span::styled(" ⚙️ SYSTEM ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                    Color::Yellow
+                ),
+                ConversationEntry::ToolCall { name, .. } => (
+                    Span::styled(format!(" 🛠️ TOOL: {} ", name), Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                    Color::Magenta
+                ),
+                ConversationEntry::Diff { path, .. } => (
+                    Span::styled(format!(" 📁 DIFF: {} ", path), Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                    Color::Yellow
+                ),
+                ConversationEntry::VerifyResult { passed, .. } => {
+                    if *passed {
+                        (
+                            Span::styled(" 🧪 VERIFIED ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                            Color::Green
+                        )
+                    } else {
+                        (
+                            Span::styled(" 🧪 FAILED ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Color::Red
+                        )
+                    }
                 }
             };
 
-            for line in text.lines() {
+            let text_content = match entry {
+                ConversationEntry::User(text) => text.as_str(),
+                ConversationEntry::Assistant(text) => text.as_str(),
+                ConversationEntry::System(text) => text.as_str(),
+                ConversationEntry::ToolCall { result, .. } => result.as_str(),
+                ConversationEntry::Diff { old_text, new_text, .. } => "",
+                ConversationEntry::VerifyResult { logs, .. } => logs.as_str(),
+            };
+
+            let mut lines = Vec::new();
+            if let ConversationEntry::Diff { old_text, new_text, .. } = entry {
+                lines.push(format!("- {}", old_text));
+                lines.push(format!("+ {}", new_text));
+            } else {
+                for line in text_content.lines() {
+                    lines.push(line.to_string());
+                }
+            }
+
+            let mut is_first = true;
+            for line in lines {
                 let trimmed = line.trim();
                 if trimmed.starts_with("```") {
                     in_code_block = !in_code_block;
-                    conversation_lines.push(Line::from(vec![Span::styled("  ────────────────────────────────────────", Style::default().fg(Color::DarkGray))]));
+                    if in_code_block {
+                        conversation_lines.push(Line::from(vec![
+                            Span::styled("    ┌── Code Block ────────────────────────┐", Style::default().fg(Color::DarkGray))
+                        ]));
+                    } else {
+                        conversation_lines.push(Line::from(vec![
+                            Span::styled("    └── End of Code ───────────────────────┘", Style::default().fg(Color::DarkGray))
+                        ]));
+                    }
                     continue;
                 }
 
-                let display_line = if in_code_block {
-                    format!("  │ {}", line)
+                if in_code_block {
+                    conversation_lines.push(Line::from(vec![
+                        Span::styled("    │ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(line, Style::default().fg(Color::White))
+                    ]));
                 } else {
-                    line.to_string()
-                };
-
-                let line_color = if in_code_block {
-                    Color::White
-                } else {
-                    base_color
-                };
-
-                conversation_lines.push(Line::from(vec![Span::styled(display_line, Style::default().fg(line_color))]));
+                    if is_first {
+                        conversation_lines.push(Line::from(vec![
+                            label_span.clone(),
+                            Span::raw(" "),
+                            Span::styled(line, Style::default().fg(text_color))
+                        ]));
+                        is_first = false;
+                    } else {
+                        conversation_lines.push(Line::from(vec![
+                            Span::raw("     │ "),
+                            Span::styled(line, Style::default().fg(text_color))
+                        ]));
+                    }
+                }
             }
+            conversation_lines.push(Line::from(""));
         }
 
         let chat_height = left_chunks[0].height.saturating_sub(2) as usize;
@@ -1686,9 +1737,9 @@ impl SimpleTui {
 
         let conv_border_style = Style::default().fg(self.theme_border(self.focus == Focus::Conversation));
         let conv_title = if self.focus == Focus::Conversation {
-            "Conversation [Focus: Esc/Tab to switch]"
+            " 💬 Conversation [Focus: Esc/Tab to switch] "
         } else {
-            "Conversation"
+            " 💬 Conversation "
         };
         let conv_paragraph = Paragraph::new(visible_lines)
             .block(
@@ -1713,16 +1764,17 @@ impl SimpleTui {
                 };
 
                 let state_span = match hunk.state {
-                    HunkState::Pending => Span::styled(" [?]", Style::default().fg(Color::Yellow)),
-                    HunkState::Approved => Span::styled(" [✓]", Style::default().fg(Color::Green)),
-                    HunkState::Rejected => Span::styled(" [✗]", Style::default().fg(Color::Red)),
-                    HunkState::Modified => Span::styled(" [~]", Style::default().fg(Color::Cyan)),
+                    HunkState::Pending => Span::styled(" ⏳ PENDING ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                    HunkState::Approved => Span::styled(" ✓ APPROVED ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                    HunkState::Rejected => Span::styled(" ✗ REJECTED ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)),
+                    HunkState::Modified => Span::styled(" ~ MODIFIED ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
                 };
 
                 diff_lines.push(Line::from(vec![
                     Span::styled(&hunk.file_path, Style::default().fg(self.theme_fg())),
                     Span::raw(": "),
                     Span::styled(&hunk.header, header_style),
+                    Span::raw(" "),
                     state_span,
                 ]));
 
@@ -1755,9 +1807,9 @@ impl SimpleTui {
 
             let diff_border_style = Style::default().fg(self.theme_border(self.focus == Focus::Diff));
             let diff_title = if self.focus == Focus::Diff {
-                "Diff Viewer [↑↓: select, Enter/a: approve, r: reject, Esc: back]"
+                " 🔍 Diff Viewer [↑↓: select, Enter/a: approve, r: reject, Esc: back] "
             } else {
-                "Diff Viewer"
+                " 🔍 Diff Viewer "
             };
             let diff_paragraph = Paragraph::new(diff_lines)
                 .block(
@@ -1799,13 +1851,13 @@ impl SimpleTui {
                 Style::default().fg(self.theme_border(false))
             };
             let input_title = if self.plan_mode {
-                "Input [Plan Mode] (Enter queues)"
+                " ⌨️ Input [Plan Mode] (Enter queues) "
             } else if self.agent_running {
-                "Input (busy: Enter queues, Ctrl-C quits)"
+                " ⌨️ Input (busy: Enter queues, Ctrl-C quits) "
             } else if self.focus == Focus::Input {
-                "Input [Enter: send, Tab: navigate]"
+                " ⌨️ Input [Enter: send, Tab: navigate] "
             } else {
-                "Input"
+                " ⌨️ Input "
             };
             let input_paragraph = Paragraph::new(self.input.as_str())
                 .block(
@@ -1837,19 +1889,19 @@ impl SimpleTui {
         };
 
         let mut status_spans = vec![
-            Span::styled(" Mode: ", Style::default().fg(self.theme_fg())),
-            Span::styled(mode_str, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
-            Span::raw(" │ Focus: "),
-            Span::styled(focus_str, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" │ Status: "),
-            Span::styled(status_str, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::styled(" ⚡ MODE: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", mode_str), Style::default().bg(mode_color).fg(Color::Black).add_modifier(Modifier::BOLD)),
+            Span::styled(" │ 🎯 FOCUS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", focus_str), Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+            Span::styled(" │ 🟢 STATUS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", status_str), Style::default().bg(status_color).fg(Color::Black).add_modifier(Modifier::BOLD)),
         ];
 
         if self.agent_running {
-            status_spans.push(Span::raw(" │ Time: "));
-            status_spans.push(Span::styled(format!("{}s", self.elapsed_seconds), Style::default().fg(Color::Yellow)));
-            status_spans.push(Span::raw(" │ Tools: "));
-            status_spans.push(Span::styled(self.tool_calls_count.to_string(), Style::default().fg(Color::Magenta)));
+            status_spans.push(Span::styled(" │ ⏳ TIME: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+            status_spans.push(Span::styled(format!(" {}s ", self.elapsed_seconds), Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)));
+            status_spans.push(Span::styled(" │ 🛠️ TOOLS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+            status_spans.push(Span::styled(format!(" {} ", self.tool_calls_count), Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)));
         }
 
         let ratio = if self.token_budget > 0 {
@@ -1866,12 +1918,12 @@ impl SimpleTui {
         };
 
         status_spans.extend(vec![
-            Span::raw(" │ Queued: "),
-            Span::styled(self.queued_messages.len().to_string(), Style::default().fg(self.theme_fg())),
-            Span::raw(" │ Tokens: "),
+            Span::styled(" │ 📥 QUEUED: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", self.queued_messages.len()), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" │ 🪙 TOKENS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("{}/{}", self.token_used, self.token_budget),
-                Style::default().fg(token_color),
+                format!(" {}/{} ", self.token_used, self.token_budget),
+                Style::default().fg(token_color).add_modifier(Modifier::BOLD),
             ),
         ]);
 
@@ -1890,56 +1942,82 @@ impl SimpleTui {
     fn render_agent_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let mut lines = Vec::new();
 
-        // Title and header
+        let spinner = if self.agent_running {
+            match self.elapsed_seconds % 10 {
+                0 => "⠋",
+                1 => "⠙",
+                2 => "⠹",
+                3 => "⠸",
+                4 => "⠼",
+                5 => "⠴",
+                6 => "⠦",
+                7 => "⠧",
+                8 => "⠇",
+                _ => "⠏",
+            }
+        } else {
+            "○"
+        };
+
+        // Header
         lines.push(Line::from(vec![
-            Span::styled(" 🤖  Agent Activity", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {} ", spinner), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("AGENT ENGINE STATUS", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" ────────────────────────────────────────", Style::default().fg(Color::DarkGray)),
         ]));
         lines.push(Line::from(""));
 
         // Active task section
         if self.agent_running {
             lines.push(Line::from(vec![
-                Span::styled(" ● ", Style::default().fg(Color::Blue)),
-                Span::styled("Running Active Task", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(" ⚡ RUNNING ", Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::raw(" "),
+                Span::styled("Active Steer Task", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             ]));
+            lines.push(Line::from(""));
             
             if let Some(task) = &self.active_agent_task {
-                let display_task = truncate_for_display(task, area.width.saturating_sub(4) as usize);
+                let display_task = truncate_for_display(task, area.width.saturating_sub(12) as usize);
                 lines.push(Line::from(vec![
-                    Span::raw("  Task: "),
-                    Span::styled(display_task, Style::default().fg(Color::Gray)),
+                    Span::styled("    Task: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(display_task, Style::default().fg(Color::White)),
                 ]));
             }
 
             lines.push(Line::from(vec![
-                Span::raw("  Status: "),
-                Span::styled(&self.active_agent_status, Style::default().fg(Color::Yellow)),
+                Span::styled("  Status: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(&self.active_agent_status, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ]));
 
             lines.push(Line::from(vec![
-                Span::raw("  Elapsed: "),
+                Span::styled(" Elapsed: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{}s", self.elapsed_seconds), Style::default().fg(Color::Gray)),
             ]));
 
             lines.push(Line::from(vec![
-                Span::raw("  Tool Calls: "),
+                Span::styled("   Tools: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(self.tool_calls_count.to_string(), Style::default().fg(Color::Magenta)),
             ]));
+            
+            lines.push(Line::from(""));
 
             // Progress bar
             let progress_width = area.width.saturating_sub(6) as usize;
             if progress_width > 0 {
-                // Determine a simulated or real progress ratio
                 let ratio = if self.token_budget > 0 {
                     (self.token_used as f32 / self.token_budget as f32).min(1.0)
                 } else {
                     0.0
                 };
                 let filled = (ratio * progress_width as f32) as usize;
+                let empty = progress_width.saturating_sub(filled);
+                
                 let progress_bar_content = format!(
                     "{}{}",
                     "█".repeat(filled),
-                    "─".repeat(progress_width.saturating_sub(filled))
+                    "░".repeat(empty)
                 );
                 lines.push(Line::from(vec![
                     Span::raw("  "),
@@ -1948,9 +2026,11 @@ impl SimpleTui {
             }
         } else {
             lines.push(Line::from(vec![
-                Span::styled(" ○ ", Style::default().fg(Color::DarkGray)),
-                Span::styled("Idle", Style::default().fg(Color::DarkGray)),
+                Span::styled(" ○ IDLE ", Style::default().bg(Color::DarkGray).fg(Color::White)),
+                Span::raw(" "),
+                Span::styled("Waiting for input", Style::default().fg(Color::DarkGray)),
             ]));
+            lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled("  No active agent tasks running.", Style::default().fg(Color::DarkGray)),
             ]));
@@ -1958,14 +2038,16 @@ impl SimpleTui {
 
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  ────────────────────────────────────────", Style::default().fg(Color::DarkGray)),
+            Span::styled(" ────────────────────────────────────────", Style::default().fg(Color::DarkGray)),
         ]));
         lines.push(Line::from(""));
 
         // Queued tasks section
         lines.push(Line::from(vec![
-            Span::styled(" 📋  Queued Tasks", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" ({})", self.queued_messages.len()), Style::default().fg(Color::Gray)),
+            Span::styled(" 📋 QUEUE ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled("Pending Task List", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" [{}]", self.queued_messages.len()), Style::default().fg(Color::Yellow)),
         ]));
         lines.push(Line::from(""));
 
@@ -2026,8 +2108,8 @@ impl SimpleTui {
         
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .title("🔌  Multi-Provider Connector (OpenCode Style) ");
+            .border_style(Style::default().fg(Color::White))
+            .title(" 🔌 CONNECTION SETTINGS (OpenCode Mode) ");
             
         f.render_widget(block, popup_area);
         
@@ -2050,77 +2132,156 @@ impl SimpleTui {
             ])
             .split(chunks[0]);
             
+        let item_width = (row_chunks[0].width.saturating_sub(2)) as usize;
+
         // 1. Render Providers List
-        let provider_border_style = if self.connect_popup.active_field == ConnectPopupField::Provider {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        let is_provider_active = self.connect_popup.active_field == ConnectPopupField::Provider;
+        let provider_border_style = if is_provider_active {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(Color::DarkGray)
+        };
+        let provider_title = if is_provider_active {
+            " 1. Provider (Active) "
+        } else {
+            " 1. Provider "
         };
         let mut provider_spans = Vec::new();
         for (idx, p) in self.connect_popup.providers.iter().enumerate() {
-            let prefix = if idx == self.connect_popup.selected_provider_idx { "▶ " } else { "  " };
-            let style = if idx == self.connect_popup.selected_provider_idx {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            let is_selected = idx == self.connect_popup.selected_provider_idx;
+            
+            let (prefix, style) = if is_selected {
+                if is_provider_active {
+                    ("▶ ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+                } else {
+                    ("➔ ", Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))
+                }
             } else {
-                Style::default().fg(Color::White)
+                if is_provider_active {
+                    ("  ", Style::default().fg(Color::White))
+                } else {
+                    ("  ", Style::default().fg(Color::DarkGray))
+                }
             };
+            
+            let item_text = format!("{prefix}{p}");
+            let padded_text = if item_text.chars().count() < item_width {
+                let padding = " ".repeat(item_width - item_text.chars().count());
+                format!("{item_text}{padding}")
+            } else {
+                item_text
+            };
+            
             provider_spans.push(Line::from(vec![
-                Span::styled(format!("{prefix}{p}"), style)
+                Span::styled(padded_text, style)
             ]));
         }
         let provider_list = Paragraph::new(provider_spans)
-            .block(Block::default().borders(Borders::ALL).border_style(provider_border_style).title(" 1. Provider "));
+            .block(Block::default().borders(Borders::ALL).border_style(provider_border_style).title(provider_title));
         f.render_widget(provider_list, row_chunks[0]);
         
         // 2. Render Models List
-        let model_border_style = if self.connect_popup.active_field == ConnectPopupField::Model {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        let is_model_active = self.connect_popup.active_field == ConnectPopupField::Model;
+        let model_border_style = if is_model_active {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(Color::DarkGray)
+        };
+        let model_title = if is_model_active {
+            " 2. Model (Active) "
+        } else {
+            " 2. Model "
         };
         let mut model_spans = Vec::new();
         for (idx, m) in self.connect_popup.models.iter().enumerate() {
-            let prefix = if idx == self.connect_popup.selected_model_idx { "▶ " } else { "  " };
-            let style = if idx == self.connect_popup.selected_model_idx {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            let is_selected = idx == self.connect_popup.selected_model_idx;
+            
+            let (prefix, style) = if is_selected {
+                if is_model_active {
+                    ("▶ ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+                } else {
+                    ("➔ ", Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))
+                }
             } else {
-                Style::default().fg(Color::White)
+                if is_model_active {
+                    ("  ", Style::default().fg(Color::White))
+                } else {
+                    ("  ", Style::default().fg(Color::DarkGray))
+                }
             };
+            
+            let item_text = format!("{prefix}{m}");
+            let padded_text = if item_text.chars().count() < item_width {
+                let padding = " ".repeat(item_width - item_text.chars().count());
+                format!("{item_text}{padding}")
+            } else {
+                item_text
+            };
+            
             model_spans.push(Line::from(vec![
-                Span::styled(format!("{prefix}{m}"), style)
+                Span::styled(padded_text, style)
             ]));
         }
         let model_list = Paragraph::new(model_spans)
-            .block(Block::default().borders(Borders::ALL).border_style(model_border_style).title(" 2. Model "));
+            .block(Block::default().borders(Borders::ALL).border_style(model_border_style).title(model_title));
         f.render_widget(model_list, row_chunks[1]);
         
         // 3. Render Api Key Field
-        let api_key_border_style = if self.connect_popup.active_field == ConnectPopupField::ApiKey {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        let is_api_active = self.connect_popup.active_field == ConnectPopupField::ApiKey;
+        let api_key_border_style = if is_api_active {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(Color::DarkGray)
         };
+        
+        let api_key_title = if self.connect_popup.api_key.is_empty() {
+            if is_api_active {
+                " 🔑 API KEY (Type API Key) "
+            } else {
+                " 🔑 API KEY (Empty - falls back to env var) "
+            }
+        } else {
+            if is_api_active {
+                " 🔒 API KEY (Active - press Enter to save) "
+            } else {
+                " 🔒 API KEY (Configured) "
+            }
+        };
+
         let api_key_display = if self.connect_popup.api_key.is_empty() {
-            " (Using env var fallback or mock) ".to_string()
+            if is_api_active {
+                "".to_string()
+            } else {
+                " <not set - using env var> ".to_string()
+            }
         } else {
             "*".repeat(self.connect_popup.api_key.len())
         };
-        let api_key_paragraph = Paragraph::new(api_key_display)
-            .block(Block::default().borders(Borders::ALL).border_style(api_key_border_style).title(" 3. API Key (Press tab to edit) "));
+        
+        let api_key_style = if self.connect_popup.api_key.is_empty() {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let api_key_paragraph = Paragraph::new(Line::from(vec![
+            Span::styled(api_key_display, api_key_style)
+        ]))
+        .block(Block::default().borders(Borders::ALL).border_style(api_key_border_style).title(api_key_title));
         f.render_widget(api_key_paragraph, chunks[1]);
         
         // 4. Render Instructions
         let instructions = vec![
             Line::from(vec![
-                Span::raw(" Nav: "),
-                Span::styled("[Tab]/[Shift-Tab]", Style::default().fg(Color::Yellow)),
-                Span::raw(" │ Select: "),
-                Span::styled("[Up/Down]", Style::default().fg(Color::Yellow)),
+                Span::styled(" Nav: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("[Tab]/[Shift-Tab]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(" │ Select: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("[Up/Down]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::raw(" Connect: "),
+                Span::styled(" Connect: ", Style::default().fg(Color::DarkGray)),
                 Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" │ Cancel: "),
+                Span::styled(" │ Cancel: ", Style::default().fg(Color::DarkGray)),
                 Span::styled("[Esc]", Style::default().fg(Color::Red)),
             ])
         ];
@@ -2128,7 +2289,7 @@ impl SimpleTui {
             .alignment(ratatui::layout::Alignment::Center);
         f.render_widget(instructions_paragraph, chunks[2]);
         
-        if self.connect_popup.active_field == ConnectPopupField::ApiKey {
+        if is_api_active {
             let cursor_x = chunks[1].x + self.connect_popup.api_key.len() as u16 + 1;
             let cursor_y = chunks[1].y + 1;
             f.set_cursor(cursor_x, cursor_y);
@@ -2231,22 +2392,31 @@ impl SimpleTui {
         };
 
         let mut lines = Vec::new();
+        let item_width = (width.saturating_sub(2)) as usize;
         for (i, opt) in self.autocomplete_options.iter().enumerate() {
             let is_selected = i == self.autocomplete_index;
             let style = if is_selected {
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::White)
             };
+            
+            let padded_opt = if opt.chars().count() < item_width {
+                let padding = " ".repeat(item_width - opt.chars().count());
+                format!("{opt}{padding}")
+            } else {
+                opt.clone()
+            };
+            
             lines.push(Line::from(vec![
-                Span::styled(opt, style)
+                Span::styled(padded_opt, style)
             ]));
         }
 
         let block = Block::default()
-            .title("Suggestions [Tab to select, Up/Down to navigate]")
+            .title(" 💡 SUGGESTIONS (Tab to cycle) ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(Color::Cyan));
 
         let paragraph = Paragraph::new(lines)
             .block(block)
