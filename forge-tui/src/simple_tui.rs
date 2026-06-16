@@ -146,6 +146,7 @@ pub struct SimpleTui {
     autocomplete_index: usize,
     did_stream_chunk: bool,
     connect_popup: ConnectPopupState,
+    show_agent_panel: bool,
 }
 
 fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> String {
@@ -173,7 +174,7 @@ impl SimpleTui {
     /// Create new SimpleTui with provider
     pub fn new(config: TuiConfig, provider: Arc<dyn ModelProvider>) -> Self {
         Self {
-            _config: config,
+            _config: config.clone(),
             provider,
             conversation: Vec::new(),
             input: String::new(),
@@ -228,6 +229,7 @@ impl SimpleTui {
                     active_field: ConnectPopupField::Provider,
                 }
             },
+            show_agent_panel: config.show_agent_panel,
         }
     }
 
@@ -446,6 +448,14 @@ impl SimpleTui {
         // Global exit shortcut
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.running = false;
+            return;
+        }
+
+        // Ctrl+p toggles Agent Activity Panel (Yoga layout toggle)
+        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.show_agent_panel = !self.show_agent_panel;
+            let state = if self.show_agent_panel { "shown" } else { "hidden" };
+            self.add_entry(ConversationEntry::System(format!("Agent activity panel is now {}", state)));
             return;
         }
 
@@ -791,8 +801,14 @@ impl SimpleTui {
                         self.add_entry(ConversationEntry::System(format!("Context action '{}' on '{}'", action, path_str)));
                     }
                     SlashCommand::Agents { action, agent_id } => {
-                        let id_str = agent_id.unwrap_or_else(|| "all".to_string());
-                        self.add_entry(ConversationEntry::System(format!("Agent action '{}' on '{}'", action, id_str)));
+                        if action == "toggle" {
+                            self.show_agent_panel = !self.show_agent_panel;
+                            let state = if self.show_agent_panel { "shown" } else { "hidden" };
+                            self.add_entry(ConversationEntry::System(format!("Agent activity panel is now {}", state)));
+                        } else {
+                            let id_str = agent_id.unwrap_or_else(|| "all".to_string());
+                            self.add_entry(ConversationEntry::System(format!("Agent action '{}' on '{}'", action, id_str)));
+                        }
                     }
                     _ => {}
                 }
@@ -1364,17 +1380,24 @@ impl SimpleTui {
         }
 
         // Main content area: Left (70%) and Right (30% for Agent Activity)
-        // Main content area: Left side takes 100% width (Agent Activity panel removed YAGNI)
+        let left_pct = if self.show_agent_panel { 70 } else { 100 };
+        let right_pct = if self.show_agent_panel { 30 } else { 0 };
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(100),
-                Constraint::Percentage(0),
+                Constraint::Percentage(left_pct),
+                Constraint::Percentage(right_pct),
             ])
             .split(main_chunks[1]);
 
         // Left side layout: Conversation, Diff (dynamic height), Input
-        let diff_height = if self.diff_hunks.is_empty() { 0 } else { 8 };
+        let diff_height = if self.diff_hunks.is_empty() {
+            0
+        } else if self.focus == Focus::Diff {
+            12
+        } else {
+            6
+        };
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1647,6 +1670,129 @@ impl SimpleTui {
 
         self.render_autocomplete_popup(f, left_chunks[2]);
         self.render_connect_popup(f);
+        if self.show_agent_panel {
+            self.render_agent_panel(f, content_chunks[1]);
+        }
+    }
+
+    fn render_agent_panel(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        let mut lines = Vec::new();
+
+        // Title and header
+        lines.push(Line::from(vec![
+            Span::styled(" 🤖  Agent Activity", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(""));
+
+        // Active task section
+        if self.agent_running {
+            lines.push(Line::from(vec![
+                Span::styled(" ● ", Style::default().fg(Color::Blue)),
+                Span::styled("Running Active Task", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            ]));
+            
+            if let Some(task) = &self.active_agent_task {
+                let display_task = truncate_for_display(task, area.width.saturating_sub(4) as usize);
+                lines.push(Line::from(vec![
+                    Span::raw("  Task: "),
+                    Span::styled(display_task, Style::default().fg(Color::Gray)),
+                ]));
+            }
+
+            lines.push(Line::from(vec![
+                Span::raw("  Status: "),
+                Span::styled(&self.active_agent_status, Style::default().fg(Color::Yellow)),
+            ]));
+
+            lines.push(Line::from(vec![
+                Span::raw("  Elapsed: "),
+                Span::styled(format!("{}s", self.elapsed_seconds), Style::default().fg(Color::Gray)),
+            ]));
+
+            lines.push(Line::from(vec![
+                Span::raw("  Tool Calls: "),
+                Span::styled(self.tool_calls_count.to_string(), Style::default().fg(Color::Magenta)),
+            ]));
+
+            // Progress bar
+            let progress_width = area.width.saturating_sub(6) as usize;
+            if progress_width > 0 {
+                // Determine a simulated or real progress ratio
+                let ratio = if self.token_budget > 0 {
+                    (self.token_used as f32 / self.token_budget as f32).min(1.0)
+                } else {
+                    0.0
+                };
+                let filled = (ratio * progress_width as f32) as usize;
+                let progress_bar_content = format!(
+                    "{}{}",
+                    "█".repeat(filled),
+                    "─".repeat(progress_width.saturating_sub(filled))
+                );
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(progress_bar_content, Style::default().fg(Color::Blue)),
+                ]));
+            }
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(" ○ ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Idle", Style::default().fg(Color::DarkGray)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  No active agent tasks running.", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ────────────────────────────────────────", Style::default().fg(Color::DarkGray)),
+        ]));
+        lines.push(Line::from(""));
+
+        // Queued tasks section
+        lines.push(Line::from(vec![
+            Span::styled(" 📋  Queued Tasks", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" ({})", self.queued_messages.len()), Style::default().fg(Color::Gray)),
+        ]));
+        lines.push(Line::from(""));
+
+        if self.queued_messages.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("  No tasks in queue.", Style::default().fg(Color::DarkGray)),
+            ]));
+        } else {
+            for (idx, task) in self.queued_messages.iter().enumerate() {
+                let display_task = truncate_for_display(task, area.width.saturating_sub(8) as usize);
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}. ", idx + 1), Style::default().fg(Color::Yellow)),
+                    Span::styled(display_task, Style::default().fg(Color::Gray)),
+                ]));
+            }
+        }
+
+        // Add shortcut legend at the bottom of the panel
+        let available_height = area.height.saturating_sub(lines.len() as u16 + 2);
+        if available_height > 1 {
+            for _ in 0..available_height.saturating_sub(1) {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("  [Ctrl-P] Toggle Panel", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+
+        let panel_border_style = Style::default().fg(Color::DarkGray);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(panel_border_style)
+            .title(" Agent Activity ");
+
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
+
+        f.render_widget(paragraph, area);
     }
 
     fn render_connect_popup(&self, f: &mut ratatui::Frame) {
@@ -1660,8 +1806,8 @@ impl SimpleTui {
             let height = 18.min(size.height);
             let x = (size.width - width) / 2;
             let y = (size.height - height) / 2;
-            let Rect = ratatui::layout::Rect::new(x, y, width, height);
-            Rect
+            let rect = ratatui::layout::Rect::new(x, y, width, height);
+            rect
         };
         
         f.render_widget(ratatui::widgets::Clear, popup_area);
@@ -2297,5 +2443,56 @@ mod tests {
         tui.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
             .await;
         assert!(!tui.connect_popup.active);
+    }
+
+    #[tokio::test]
+    async fn test_yoga_layout_toggling_and_resizing() {
+        let mut tui = test_tui();
+        
+        // Default: show_agent_panel is true (from config)
+        assert!(tui.show_agent_panel);
+        
+        // Toggle via Ctrl-P keybinding
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await;
+        assert!(!tui.show_agent_panel);
+        
+        // Toggle via slash command /agents toggle
+        tui.input = "/agents toggle".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+        assert!(tui.show_agent_panel);
+
+        // Verify focus state adjustments for Diff height
+        tui.diff_hunks = vec![DiffHunk {
+            file_path: "src/lib.rs".to_string(),
+            header: "@@ -1,3 +1,3 @@".to_string(),
+            removals: vec!["old".to_string()],
+            additions: vec!["new".to_string()],
+            state: HunkState::Pending,
+        }];
+        
+        // If not focused on Diff, height should be 6
+        tui.focus = Focus::Input;
+        let diff_height_unfocused = if tui.diff_hunks.is_empty() {
+            0
+        } else if tui.focus == Focus::Diff {
+            12
+        } else {
+            6
+        };
+        assert_eq!(diff_height_unfocused, 6);
+
+        // If focused on Diff, height should stretch to 12 (Yoga feature)
+        tui.focus = Focus::Diff;
+        let diff_height_focused = if tui.diff_hunks.is_empty() {
+            0
+        } else if tui.focus == Focus::Diff {
+            12
+        } else {
+            6
+        };
+        assert_eq!(diff_height_focused, 12);
     }
 }
