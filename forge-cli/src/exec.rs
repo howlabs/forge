@@ -20,8 +20,6 @@ pub struct ExecConfig {
     pub provider: String,
     pub model: String,
     pub verify: bool,
-    pub output_format: String, // "json" | "text"
-    pub trace: bool,
 }
 
 /// Optional forge.toml shape consumed by exec mode.
@@ -70,6 +68,7 @@ pub struct ExecResult {
     pub task_id: String,
     pub duration_ms: u64,
     pub steps_completed: usize,
+    pub verify_requested: bool,
     pub verify_passed: bool,
     pub error_message: Option<String>,
 }
@@ -77,7 +76,7 @@ pub struct ExecResult {
 impl ExecResult {
     /// Get exit code for CI/CD
     pub fn exit_code(&self) -> i32 {
-        if self.success && self.verify_passed {
+        if self.success && (!self.verify_requested || self.verify_passed) {
             0
         } else {
             1
@@ -183,7 +182,7 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
                 .await
             {
                 Ok(steps) => (steps, true),
-                Err(e) => return failed_result(task_id, start, e),
+                Err(e) => return failed_result(task_id, start, config.verify, e),
             }
         } else {
             let verifier = BuildVerifier::new();
@@ -192,12 +191,14 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
                 .await
             {
                 Ok(steps) => (steps, true),
-                Err(e) => return failed_result(task_id, start, e),
+                Err(e) => return failed_result(task_id, start, config.verify, e),
             }
         }
     } else {
-        let steps = event_loop.run().await?;
-        (steps, false)
+        match event_loop.run().await {
+            Ok(steps) => (steps, false),
+            Err(e) => return failed_result(task_id, start, config.verify, e),
+        }
     };
 
     Ok(ExecResult {
@@ -205,6 +206,7 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
         task_id,
         duration_ms: start.elapsed().as_millis() as u64,
         steps_completed: steps,
+        verify_requested: config.verify,
         verify_passed,
         error_message: None,
     })
@@ -213,6 +215,7 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
 fn failed_result(
     task_id: String,
     start: Instant,
+    verify_requested: bool,
     error: anyhow::Error,
 ) -> anyhow::Result<ExecResult> {
     Ok(ExecResult {
@@ -220,6 +223,7 @@ fn failed_result(
         task_id,
         duration_ms: start.elapsed().as_millis() as u64,
         steps_completed: 0,
+        verify_requested,
         verify_passed: false,
         error_message: Some(error.to_string()),
     })
@@ -237,21 +241,17 @@ async fn attach_mcp_servers<P: provider::ModelProvider>(
     };
 
     for (label, server) in &mcp.servers {
-        match event_loop
+        if let Err(e) = event_loop
             .with_mcp_client(server.command.clone(), server.args.clone())
             .await
         {
-            Ok(updated) => {
-                tracing::info!("Connected MCP server '{}'", label);
-                event_loop = updated;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to connect MCP server '{}': {} — skipping",
-                    label,
-                    e
-                );
-            }
+            tracing::warn!(
+                "Failed to connect MCP server '{}': {} — skipping",
+                label,
+                e
+            );
+        } else {
+            tracing::info!("Connected MCP server '{}'", label);
         }
     }
 
@@ -345,8 +345,6 @@ mod tests {
             provider: "anthropic".to_string(),
             model: "claude-opus-4-5".to_string(),
             verify: true,
-            output_format: "json".to_string(),
-            trace: false,
         };
         assert_eq!(config.task, "Fix the bug");
         assert!(config.verify);
@@ -359,6 +357,7 @@ mod tests {
             task_id: "test-123".to_string(),
             duration_ms: 1000,
             steps_completed: 5,
+            verify_requested: true,
             verify_passed: true,
             error_message: None,
         };
@@ -374,16 +373,29 @@ mod tests {
             task_id: "test".to_string(),
             duration_ms: 1000,
             steps_completed: 1,
+            verify_requested: true,
             verify_passed: true,
             error_message: None,
         };
         assert_eq!(result.exit_code(), 0);
+
+        let result_no_verify = ExecResult {
+            success: true,
+            task_id: "test".to_string(),
+            duration_ms: 1000,
+            steps_completed: 1,
+            verify_requested: false,
+            verify_passed: false,
+            error_message: None,
+        };
+        assert_eq!(result_no_verify.exit_code(), 0);
 
         let result_fail = ExecResult {
             success: false,
             task_id: "test".to_string(),
             duration_ms: 1000,
             steps_completed: 1,
+            verify_requested: true,
             verify_passed: false,
             error_message: Some("Error".to_string()),
         };
@@ -397,6 +409,7 @@ mod tests {
             task_id: "test-abc".to_string(),
             duration_ms: 500,
             steps_completed: 3,
+            verify_requested: true,
             verify_passed: true,
             error_message: None,
         };
@@ -449,13 +462,11 @@ mod tests {
             // Empty dir has no detectable build, so skip verify here; the loop
             // itself is exercised regardless.
             verify: false,
-            output_format: "json".to_string(),
-            trace: false,
         };
 
         let result = run_exec(config).await.unwrap();
         assert!(result.success, "mock exec should succeed offline");
-        assert_eq!(result.exit_code(), 1); // verify_passed=false -> non-zero
+        assert_eq!(result.exit_code(), 0); // verify_requested=false -> success
         assert!(result.steps_completed >= 1);
         assert!(result.error_message.is_none());
     }

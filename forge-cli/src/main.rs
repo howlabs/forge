@@ -73,8 +73,12 @@ enum Commands {
     },
     /// Headless exec mode for CI/CD
     Exec {
-        /// Task description
-        task: String,
+        /// Task description (positional)
+        task: Option<String>,
+
+        /// Task description (alias for positional task)
+        #[arg(long)]
+        prompt: Option<String>,
 
         /// Path to the project directory
         #[arg(short, long, default_value = ".")]
@@ -271,6 +275,7 @@ async fn main() -> Result<()> {
         }
         Commands::Exec {
             task,
+            prompt,
             project_path,
             config,
             api_key,
@@ -283,6 +288,10 @@ async fn main() -> Result<()> {
             tracing::info!("Forge v{} starting (exec mode)", env!("CARGO_PKG_VERSION"));
 
             let api_key = resolve_api_key(&provider, api_key)?;
+
+            let task = task.or(prompt).ok_or_else(|| {
+                anyhow::anyhow!("Missing task description. Pass it as a positional argument or via --prompt.")
+            })?;
 
             let exec_config = ExecConfig {
                 task,

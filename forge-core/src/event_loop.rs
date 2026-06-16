@@ -414,14 +414,18 @@ impl<P: ModelProvider> EventLoop<P> {
         }
     }
 
-    pub async fn with_mcp_client(mut self, command: String, args: Vec<String>) -> Result<Self> {
+    pub async fn with_mcp_client(
+        &mut self,
+        command: String,
+        args: Vec<String>,
+    ) -> Result<()> {
         let mut client = McpClient::new_stdio(command, args).await?;
         client.initialize().await?;
         let tools = client.list_tools().await?;
         info!("MCP client connected, {} tools available", tools.len());
         self.mcp_tools = tools;
         self.mcp_client = Some(Arc::new(Mutex::new(client)));
-        Ok(self)
+        Ok(())
     }
 
     /// Create an MCP server that exposes Forge's built-in tools
