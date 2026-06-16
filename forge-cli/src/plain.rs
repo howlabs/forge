@@ -548,7 +548,8 @@ fn now() -> u64 {
 fn trim_multiline(s: &str) -> String {
     let s = s.trim();
     if s.len() > 240 {
-        format!("{}…", &s[..240])
+        let end = s.floor_char_boundary(240);
+        format!("{}…", &s[..end])
     } else {
         s.replace('\n', " | ")
     }
