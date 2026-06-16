@@ -1747,7 +1747,7 @@ impl SimpleTui {
         let conv_paragraph = Paragraph::new(visible_lines)
             .block(
                 Block::default()
-                    .borders(Borders::ALL)
+                    .borders(Borders::TOP)
                     .border_style(conv_border_style)
                     .title(conv_title),
             )
@@ -1834,7 +1834,7 @@ impl SimpleTui {
             let diff_paragraph = Paragraph::new(diff_lines)
                 .block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::TOP)
                         .border_style(diff_border_style)
                         .title(diff_title),
                 )
@@ -1847,16 +1847,16 @@ impl SimpleTui {
         if let Some(pending) = &self.pending_approval {
             let details_display = truncate_for_display(&pending.details, size.width.saturating_sub(65) as usize);
             let prompt_text = format!(
-                " Agent wants to run: {} ({})? Press [y] to Approve, [n] to Reject",
+                "  Agent wants to run: {} ({})? Press [y] to Approve, [n] to Reject",
                 pending.tool_name,
                 details_display
             );
             let prompt_paragraph = Paragraph::new(prompt_text)
                 .block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::TOP)
                         .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-                        .title("⚠️  Interactive Tool Approval Required"),
+                        .title(" ⚠️  Interactive Tool Approval Required "),
                 )
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
             f.render_widget(prompt_paragraph, left_chunks[2]);
@@ -1879,17 +1879,20 @@ impl SimpleTui {
             } else {
                 " ⌨️ Input "
             };
-            let input_paragraph = Paragraph::new(self.input.as_str())
+            let input_paragraph = Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::raw(self.input.as_str())
+            ]))
                 .block(
                     Block::default()
-                        .borders(Borders::ALL)
+                        .borders(Borders::TOP)
                         .border_style(input_border_style)
                         .title(input_title),
                 )
                 .style(default_style);
             f.render_widget(input_paragraph, left_chunks[2]);
             if self.focus == Focus::Input && !self.agent_running && !self.connect_popup.active {
-                f.set_cursor(left_chunks[2].x + self.cursor as u16 + 1, left_chunks[2].y + 1);
+                f.set_cursor(left_chunks[2].x + self.cursor as u16 + 2, left_chunks[2].y + 1);
             }
         }
 
@@ -2098,9 +2101,9 @@ impl SimpleTui {
 
         let panel_border_style = Style::default().fg(Color::DarkGray);
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::LEFT | Borders::TOP)
             .border_style(panel_border_style)
-            .title(" Agent Activity ");
+            .title(" 🤖 AGENT ACTIVITY ");
 
         let paragraph = Paragraph::new(lines)
             .block(block)
