@@ -13,7 +13,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::{Color, Style, Modifier},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Terminal,
@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use crate::TuiConfig;
 use provider::ModelProvider;
+use crate::panels::diff_viewer::{DiffHunk, HunkState};
 
 #[derive(Clone)]
 pub enum ConversationEntry {
@@ -65,6 +66,20 @@ enum AgentUpdate {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Focus {
+    Input,
+    Diff,
+    Conversation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThemeMode {
+    Dark,
+    Light,
+    Safe,
+}
+
 /// Simple TUI that works with real providers
 pub struct SimpleTui {
     _config: TuiConfig,
@@ -82,6 +97,20 @@ pub struct SimpleTui {
     agent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AgentUpdate>>,
     token_used: u32,
     token_budget: u32,
+
+    // Redesigned fields
+    focus: Focus,
+    diff_hunks: Vec<DiffHunk>,
+    selected_hunk: usize,
+    active_agent_task: Option<String>,
+    active_agent_status: String,
+    tool_calls_count: u32,
+    elapsed_seconds: u32,
+    start_time: Option<std::time::Instant>,
+    plan_mode: bool,
+    checkpoint_available: Option<String>,
+    theme_mode: ThemeMode,
+    stream_queue: Vec<char>,
 }
 
 impl SimpleTui {
@@ -103,6 +132,18 @@ impl SimpleTui {
             agent_rx: None,
             token_used: 0,
             token_budget: 200_000,
+            focus: Focus::Input,
+            diff_hunks: Vec::new(),
+            selected_hunk: 0,
+            active_agent_task: None,
+            active_agent_status: "Idle".to_string(),
+            tool_calls_count: 0,
+            elapsed_seconds: 0,
+            start_time: None,
+            plan_mode: false,
+            checkpoint_available: None,
+            theme_mode: ThemeMode::Dark,
+            stream_queue: Vec::new(),
         }
     }
 
@@ -138,7 +179,7 @@ impl SimpleTui {
             "Welcome to Forge TUI! Type your message and press Enter to send.".to_string(),
         ));
         self.add_entry(ConversationEntry::System(
-            "Press 'q' to quit, '?' for help.".to_string(),
+            "Press Shift+Tab to toggle Plan Mode, Tab to cycle pane focus, 'q' to quit.".to_string(),
         ));
 
         while self.running {
@@ -164,74 +205,165 @@ impl SimpleTui {
 
     /// Handle keyboard events
     async fn handle_key_event(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.running = false;
+        // Global exit shortcut
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.running = false;
+            return;
+        }
+
+        // Shift+Tab (BackTab) toggles Plan Mode globally (Kiro CLI style)
+        if key.code == KeyCode::BackTab {
+            self.plan_mode = !self.plan_mode;
+            let status = if self.plan_mode { "enabled" } else { "disabled" };
+            self.add_entry(ConversationEntry::System(format!("Plan mode {}", status)));
+            return;
+        }
+
+        // Global resume shortcut
+        if key.code == KeyCode::Char('R') && self.checkpoint_available.is_some() {
+            if let Some(task_id) = self.checkpoint_available.clone() {
+                self.checkpoint_available = None;
+                self.add_entry(ConversationEntry::System(format!("Resuming task from checkpoint: {}", task_id)));
+                self.start_agent_task(format!("Resume task {}", task_id));
             }
-            KeyCode::Char('q') | KeyCode::Esc if !self.has_draft() => {
-                self.running = false;
-            }
-            KeyCode::Char('?') => {
-                self.show_help = !self.show_help;
-                if self.show_help {
-                    self.show_help();
-                }
-            }
-            KeyCode::Enter => {
-                if !self.input.trim().is_empty() {
-                    if self.agent_running {
-                        self.queue_current_input();
-                    } else {
-                        self.send_message().await;
+            return;
+        }
+
+        match self.focus {
+            Focus::Input => {
+                match key.code {
+                    KeyCode::Esc => {
+                        if !self.has_draft() {
+                            self.running = false;
+                        }
                     }
+                    KeyCode::Char('q') => {
+                        if !self.has_draft() {
+                            self.running = false;
+                        }
+                    }
+                    KeyCode::Char('?') => {
+                        self.show_help = !self.show_help;
+                        if self.show_help {
+                            self.show_help();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if !self.input.trim().is_empty() {
+                            if self.agent_running {
+                                self.queue_current_input();
+                            } else {
+                                self.send_message().await;
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if self.cursor > 0 {
+                            let previous = self.previous_cursor_boundary();
+                            self.input.drain(previous..self.cursor);
+                            self.cursor = previous;
+                        }
+                    }
+                    KeyCode::Delete => {
+                        if self.cursor < self.input.len() {
+                            self.input.remove(self.cursor);
+                        }
+                    }
+                    KeyCode::Left => {
+                        self.cursor = self.previous_cursor_boundary();
+                    }
+                    KeyCode::Right => {
+                        self.cursor = self.next_cursor_boundary();
+                    }
+                    KeyCode::Home => {
+                        self.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        self.cursor = self.input.len();
+                    }
+                    KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.history_back();
+                    }
+                    KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.history_forward();
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.input.clear();
+                        self.cursor = 0;
+                    }
+                    KeyCode::Tab => {
+                        self.focus = if !self.diff_hunks.is_empty() {
+                            Focus::Diff
+                        } else {
+                            Focus::Conversation
+                        };
+                    }
+                    KeyCode::Char(c) => {
+                        self.input.insert(self.cursor, c);
+                        self.cursor += c.len_utf8();
+                        self.history_index = None;
+                    }
+                    _ => {}
                 }
             }
-            KeyCode::Backspace => {
-                if self.cursor > 0 {
-                    let previous = self.previous_cursor_boundary();
-                    self.input.drain(previous..self.cursor);
-                    self.cursor = previous;
+            Focus::Diff => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.focus = Focus::Input;
+                    }
+                    KeyCode::Up => {
+                        if self.selected_hunk > 0 {
+                            self.selected_hunk -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if self.selected_hunk < self.diff_hunks.len().saturating_sub(1) {
+                            self.selected_hunk += 1;
+                        }
+                    }
+                    KeyCode::Char('a') | KeyCode::Enter => {
+                        if self.selected_hunk < self.diff_hunks.len() {
+                            self.diff_hunks[self.selected_hunk].state = HunkState::Approved;
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        if self.selected_hunk < self.diff_hunks.len() {
+                            self.diff_hunks[self.selected_hunk].state = HunkState::Rejected;
+                        }
+                    }
+                    KeyCode::Char('A') => {
+                        for hunk in &mut self.diff_hunks {
+                            hunk.state = HunkState::Approved;
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        for hunk in &mut self.diff_hunks {
+                            hunk.state = HunkState::Rejected;
+                        }
+                    }
+                    KeyCode::Tab => {
+                        self.focus = Focus::Conversation;
+                    }
+                    _ => {}
                 }
             }
-            KeyCode::Delete => {
-                if self.cursor < self.input.len() {
-                    self.input.remove(self.cursor);
+            Focus::Conversation => {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.focus = Focus::Input;
+                    }
+                    KeyCode::Up | KeyCode::PageUp => {
+                        self.scroll_offset = self.scroll_offset.saturating_add(2);
+                    }
+                    KeyCode::Down | KeyCode::PageDown => {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(2);
+                    }
+                    KeyCode::Tab => {
+                        self.focus = Focus::Input;
+                    }
+                    _ => {}
                 }
             }
-            KeyCode::Left => {
-                self.cursor = self.previous_cursor_boundary();
-            }
-            KeyCode::Right => {
-                self.cursor = self.next_cursor_boundary();
-            }
-            KeyCode::Home => {
-                self.cursor = 0;
-            }
-            KeyCode::End => {
-                self.cursor = self.input.len();
-            }
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.history_back();
-            }
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.history_forward();
-            }
-            KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(5);
-            }
-            KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(5);
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.clear();
-                self.cursor = 0;
-            }
-            KeyCode::Char(c) => {
-                self.input.insert(self.cursor, c);
-                self.cursor += c.len_utf8();
-                self.history_index = None;
-            }
-            _ => {}
         }
     }
 
@@ -239,14 +371,60 @@ impl SimpleTui {
     async fn send_message(&mut self) {
         let user_message = self.input.clone();
         self.remember_history(user_message.clone());
-        self.add_entry(ConversationEntry::User(user_message.clone()));
         self.input.clear();
         self.cursor = 0;
+
+        let trimmed = user_message.trim();
+        if trimmed == "/plan" {
+            self.plan_mode = !self.plan_mode;
+            let status = if self.plan_mode { "enabled" } else { "disabled" };
+            self.add_entry(ConversationEntry::System(format!("Plan mode {}", status)));
+            return;
+        }
+
+        if trimmed == "/help" || trimmed == "/?" {
+            self.show_help();
+            return;
+        }
+
+        if trimmed.starts_with("/theme") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() > 1 {
+                match parts[1] {
+                    "dark" => {
+                        self.theme_mode = ThemeMode::Dark;
+                        self.add_entry(ConversationEntry::System("Theme changed to dark".to_string()));
+                    }
+                    "light" => {
+                        self.theme_mode = ThemeMode::Light;
+                        self.add_entry(ConversationEntry::System("Theme changed to light".to_string()));
+                    }
+                    "safe" => {
+                        self.theme_mode = ThemeMode::Safe;
+                        self.add_entry(ConversationEntry::System("Theme changed to safe (high compatibility)".to_string()));
+                    }
+                    _ => {
+                        self.add_entry(ConversationEntry::System("Unknown theme. Available: dark, light, safe".to_string()));
+                    }
+                }
+            } else {
+                self.add_entry(ConversationEntry::System("Usage: /theme <dark|light|safe>".to_string()));
+            }
+            return;
+        }
+
+        self.add_entry(ConversationEntry::User(user_message.clone()));
         self.start_agent_task(user_message);
     }
 
     fn start_agent_task(&mut self, task: String) {
         self.agent_running = true;
+        self.active_agent_task = Some(task.clone());
+        self.active_agent_status = "Running".to_string();
+        self.tool_calls_count = 0;
+        self.start_time = Some(std::time::Instant::now());
+        self.elapsed_seconds = 0;
+
         self.add_entry(ConversationEntry::System(format!(
             "Starting task: {}",
             task
@@ -276,7 +454,8 @@ impl SimpleTui {
             };
 
             let mut event_loop =
-                forge_core::event_loop::EventLoop::new(provider, context, sandbox, task_clone);
+                forge_core::event_loop::EventLoop::new(provider, context, sandbox, task_clone)
+                    .with_mcp_server();
 
             // Forward live loop events into the TUI update channel so the
             // conversation panel can show tool calls, output, and diffs as
@@ -312,6 +491,21 @@ impl SimpleTui {
     }
 
     async fn poll_agent_updates(&mut self) {
+        if let Some(start) = self.start_time {
+            self.elapsed_seconds = start.elapsed().as_secs() as u32;
+        }
+
+        // Drain character chunks from stream_queue to simulate streaming
+        if !self.stream_queue.is_empty() {
+            let take_count = self.stream_queue.len().min(8);
+            let chunk: String = self.stream_queue.drain(0..take_count).collect();
+            if let Some(ConversationEntry::Assistant(ref mut text)) = self.conversation.last_mut() {
+                text.push_str(&chunk);
+            } else {
+                self.conversation.push(ConversationEntry::Assistant(chunk));
+            }
+        }
+
         // Drain everything currently queued so fast tool/diff bursts show up
         // within one frame instead of one-per-tick.
         loop {
@@ -351,9 +545,12 @@ impl SimpleTui {
         use forge_core::LoopEvent;
         match event {
             LoopEvent::AssistantMessage { content, .. } => {
-                self.add_entry(ConversationEntry::Assistant(content));
+                self.conversation.push(ConversationEntry::Assistant(String::new()));
+                self.stream_queue.extend(content.chars());
             }
             LoopEvent::ToolStarted { name } => {
+                self.tool_calls_count += 1;
+                self.active_agent_status = format!("Running tool: {}", name);
                 self.add_entry(ConversationEntry::ToolCall {
                     name,
                     result: "running...".to_string(),
@@ -364,11 +561,12 @@ impl SimpleTui {
                 result,
                 is_error,
             } => {
-                let result = truncate_for_display(&result, 800);
+                self.active_agent_status = "Running".to_string();
+                let result_display = truncate_for_display(&result, 800);
                 let prefix = if is_error { "error: " } else { "" };
                 self.add_entry(ConversationEntry::ToolCall {
                     name,
-                    result: format!("{prefix}{result}"),
+                    result: format!("{prefix}{result_display}"),
                 });
             }
             LoopEvent::DiffApplied {
@@ -376,6 +574,10 @@ impl SimpleTui {
                 old_text,
                 new_text,
             } => {
+                let hunks = self.compute_diff(&path, &old_text, &new_text);
+                self.diff_hunks.extend(hunks);
+                self.focus = Focus::Diff;
+
                 self.add_entry(ConversationEntry::Diff {
                     path,
                     old_text: truncate_for_display(&old_text, 400),
@@ -383,6 +585,7 @@ impl SimpleTui {
                 });
             }
             LoopEvent::VerifyResult { passed, logs } => {
+                self.active_agent_status = if passed { "Done (verified)".to_string() } else { "Failed verification".to_string() };
                 self.add_entry(ConversationEntry::VerifyResult {
                     passed,
                     logs: truncate_for_display(&logs, 800),
@@ -394,6 +597,8 @@ impl SimpleTui {
     /// Finish the current agent task and start the next queued message, if any.
     fn finish_agent_task(&mut self) {
         self.agent_running = false;
+        self.active_agent_status = "Idle".to_string();
+        self.start_time = None;
         self.agent_rx = None;
         if let Some(next) = self.queued_messages.first().cloned() {
             self.queued_messages.remove(0);
@@ -408,9 +613,11 @@ impl SimpleTui {
     fn add_entry(&mut self, entry: ConversationEntry) {
         self.conversation.push(entry);
     }
+
     fn has_draft(&self) -> bool {
         !self.input.trim().is_empty()
     }
+
     fn previous_cursor_boundary(&self) -> usize {
         self.input[..self.cursor]
             .char_indices()
@@ -482,30 +689,53 @@ impl SimpleTui {
             "  Type your message and press Enter to send; while busy, Enter queues it".to_string(),
         ));
         self.add_entry(ConversationEntry::System(
-            "  Ctrl+↑/↓ - History, PageUp/PageDown - Scroll".to_string(),
+            "  Tab - Cycle active pane focus (Input, Diff, Chat)".to_string(),
         ));
         self.add_entry(ConversationEntry::System(
-            "  Home/End/←/→ - Edit, Ctrl+U - Clear draft".to_string(),
+            "  Shift+Tab - Toggle Plan Mode globally".to_string(),
+        ));
+        self.add_entry(ConversationEntry::System(
+            "  /theme <dark|light|safe> - Customize TUI colors".to_string(),
+        ));
+        self.add_entry(ConversationEntry::System(
+            "  Ctrl+↑/↓ - History, PageUp/PageDown - Scroll Conversation".to_string(),
+        ));
+        self.add_entry(ConversationEntry::System(
+            "  Home/End/←/→ - Edit input, Ctrl+U - Clear draft".to_string(),
         ));
         self.add_entry(ConversationEntry::System(
             "  q/Esc - Quit when input is empty".to_string(),
+        ));
+        self.add_entry(ConversationEntry::System(
+            "  /plan - Toggle Plan/Build mode".to_string(),
         ));
         self.add_entry(ConversationEntry::System(
             "  ? - Show this help".to_string(),
         ));
     }
 
+    #[allow(dead_code)]
     fn status_text(&self) -> String {
+        let mode_str = if self.plan_mode { "PLAN" } else { "BUILD" };
+        let focus_str = match self.focus {
+            Focus::Input => "INPUT",
+            Focus::Diff => "DIFF",
+            Focus::Conversation => "CHAT",
+        };
         if self.agent_running {
             format!(
-                " [WORKING...] | queued: {} | Tokens: {}/{}",
+                " Mode: {} | Focus: {} | [WORKING...] | queued: {} | Tokens: {}/{}",
+                mode_str,
+                focus_str,
                 self.queued_messages.len(),
                 self.token_used,
                 self.token_budget
             )
         } else {
             format!(
-                " Ready | queued: {} | Tokens: {}/{}",
+                " Mode: {} | Focus: {} | Ready | queued: {} | Tokens: {}/{}",
+                mode_str,
+                focus_str,
                 self.queued_messages.len(),
                 self.token_used,
                 self.token_budget
@@ -513,101 +743,400 @@ impl SimpleTui {
         }
     }
 
+    fn theme_bg(&self) -> Color {
+        match self.theme_mode {
+            ThemeMode::Dark => Color::Reset,
+            ThemeMode::Light => Color::White,
+            ThemeMode::Safe => Color::Reset,
+        }
+    }
+
+    fn theme_fg(&self) -> Color {
+        match self.theme_mode {
+            ThemeMode::Dark => Color::White,
+            ThemeMode::Light => Color::Black,
+            ThemeMode::Safe => Color::Reset,
+        }
+    }
+
+    fn theme_border(&self, active: bool) -> Color {
+        if active {
+            match self.theme_mode {
+                ThemeMode::Dark => Color::Cyan,
+                ThemeMode::Light => Color::Blue,
+                ThemeMode::Safe => Color::White,
+            }
+        } else {
+            match self.theme_mode {
+                ThemeMode::Dark => Color::DarkGray,
+                ThemeMode::Light => Color::Gray,
+                ThemeMode::Safe => Color::Reset,
+            }
+        }
+    }
+
+    fn compute_diff(&self, file_path: &str, old: &str, new: &str) -> Vec<DiffHunk> {
+        let old_lines: Vec<&str> = old.lines().collect();
+        let new_lines: Vec<&str> = new.lines().collect();
+
+        let mut hunks = Vec::new();
+        let mut current_hunk = DiffHunk {
+            file_path: file_path.to_string(),
+            header: String::new(),
+            removals: Vec::new(),
+            additions: Vec::new(),
+            state: HunkState::Pending,
+        };
+
+        let max_lines = old_lines.len().max(new_lines.len());
+        let mut in_hunk = false;
+
+        for i in 0..max_lines {
+            let old_line = old_lines.get(i).copied().unwrap_or("");
+            let new_line = new_lines.get(i).copied().unwrap_or("");
+
+            if old_line != new_line {
+                if !in_hunk {
+                    in_hunk = true;
+                    current_hunk = DiffHunk {
+                        file_path: file_path.to_string(),
+                        header: format!("@@ -{},+{} @@", i + 1, i + 1),
+                        removals: Vec::new(),
+                        additions: Vec::new(),
+                        state: HunkState::Pending,
+                    };
+                }
+
+                if !old_line.is_empty() {
+                    current_hunk.removals.push(old_line.to_string());
+                }
+                if !new_line.is_empty() {
+                    current_hunk.additions.push(new_line.to_string());
+                }
+            } else if in_hunk {
+                in_hunk = false;
+                hunks.push(current_hunk.clone());
+            }
+        }
+
+        if in_hunk {
+            hunks.push(current_hunk);
+        }
+
+        hunks
+    }
+
     /// Render the UI
     fn render(&self, f: &mut ratatui::Frame) {
         let size = f.size();
+        let default_style = Style::default().bg(self.theme_bg()).fg(self.theme_fg());
 
-        // Main layout
-        let chunks = Layout::default()
+        // Main layout with banner (hidden/visible), content, status
+        let banner_height = if self.checkpoint_available.is_some() { 3 } else { 0 };
+        let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(10),   // Conversation area
-                Constraint::Length(3), // Input box
-                Constraint::Length(1), // Status bar
+                Constraint::Length(banner_height), // Checkpoint banner
+                Constraint::Min(0),                // Main content
+                Constraint::Length(1),             // Status bar
             ])
             .split(size);
 
-        // Render conversation
+        // Render Checkpoint banner if available
+        if let Some(task_id) = &self.checkpoint_available {
+            let banner_text = format!(
+                " ⚠️  CHECKPOINT DETECTED: Task '{}' crashed. Press 'R' to resume! ",
+                task_id
+            );
+            let banner_paragraph = Paragraph::new(banner_text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title("Checkpoint Recovery"),
+                )
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            f.render_widget(banner_paragraph, main_chunks[0]);
+        }
+
+        // Main content area: Left (70%) and Right (30% for Agent Activity)
+        let show_panel = self._config.show_agent_panel;
+        let content_chunks = if show_panel {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(70), // Left side
+                    Constraint::Percentage(30), // Right side
+                ])
+                .split(main_chunks[1])
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(100),
+                    Constraint::Percentage(0),
+                ])
+                .split(main_chunks[1])
+        };
+
+        // Left side layout: Conversation, Diff (dynamic height), Input
+        let diff_height = if self.diff_hunks.is_empty() { 0 } else { 8 };
+        let left_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),                 // Conversation
+                Constraint::Length(diff_height),    // Diff viewer
+                Constraint::Length(3),              // Input box
+            ])
+            .split(content_chunks[0]);
+
+        // 1. Render Conversation history
         let conversation_lines: Vec<Line> = self
             .conversation
             .iter()
             .map(|entry| {
                 let (color, text) = match entry {
                     ConversationEntry::User(text) => (Color::Cyan, format!("You: {}", text)),
-                    ConversationEntry::Assistant(text) => {
-                        (Color::Green, format!("Forge: {}", text))
-                    }
+                    ConversationEntry::Assistant(text) => (Color::Green, format!("Forge: {}", text)),
                     ConversationEntry::System(text) => (Color::Yellow, format!("System: {}", text)),
                     ConversationEntry::ToolCall { name, result } => {
                         (Color::Magenta, format!("[tool: {}] {}", name, result))
                     }
-                    ConversationEntry::Diff {
-                        path,
-                        old_text,
-                        new_text,
-                    } => (
-                        Color::Yellow,
-                        format!("[diff: {}]\n- {}\n+ {}", path, old_text, new_text),
-                    ),
+                    ConversationEntry::Diff { path, old_text, new_text } => {
+                        (Color::Yellow, format!("[diff: {}]\n- {}\n+ {}", path, old_text, new_text))
+                    }
                     ConversationEntry::VerifyResult { passed, logs } => {
+                        let prefix = if *passed { "[✓ Passed]" } else { "[✗ Failed]" };
                         let color = if *passed { Color::Green } else { Color::Red };
-                        (color, format!("[verify: {}] {}", passed, logs))
+                        (color, format!("{} {}", prefix, logs))
                     }
                 };
-
                 Line::from(vec![Span::styled(text, Style::default().fg(color))])
             })
             .collect();
 
-        // Show last N lines
         let visible_lines: Vec<Line> = conversation_lines
             .iter()
             .cloned()
             .rev()
             .skip(self.scroll_offset as usize)
-            .take(chunks[0].height.saturating_sub(1) as usize)
+            .take(left_chunks[0].height.saturating_sub(2) as usize)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .collect();
 
-        let paragraph = Paragraph::new(visible_lines)
+        let conv_border_style = Style::default().fg(self.theme_border(self.focus == Focus::Conversation));
+        let conv_title = if self.focus == Focus::Conversation {
+            "Conversation [Focus: Esc/Tab to switch]"
+        } else {
+            "Conversation"
+        };
+        let conv_paragraph = Paragraph::new(visible_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Blue))
-                    .title("Conversation"),
+                    .border_style(conv_border_style)
+                    .title(conv_title),
             )
+            .style(default_style)
             .wrap(Wrap { trim: false });
+        f.render_widget(conv_paragraph, left_chunks[0]);
 
-        f.render_widget(paragraph, chunks[0]);
+        // 2. Render Diff Viewer (if not empty)
+        if !self.diff_hunks.is_empty() {
+            let mut diff_lines = Vec::new();
+            for (i, hunk) in self.diff_hunks.iter().enumerate() {
+                let is_selected = i == self.selected_hunk && self.focus == Focus::Diff;
+                let header_style = if is_selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
 
-        // Render input box
-        let input_style = if self.agent_running {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::Blue)
-        };
-        let input_title = if self.agent_running {
-            "Input (busy: Enter queues, Ctrl-C quits)"
-        } else {
-            "Input (Enter sends, ? help)"
-        };
-        let input_paragraph = Paragraph::new(self.input.as_str()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(input_style)
-                .title(input_title),
-        );
+                let state_span = match hunk.state {
+                    HunkState::Pending => Span::styled(" [?]", Style::default().fg(Color::Yellow)),
+                    HunkState::Approved => Span::styled(" [✓]", Style::default().fg(Color::Green)),
+                    HunkState::Rejected => Span::styled(" [✗]", Style::default().fg(Color::Red)),
+                    HunkState::Modified => Span::styled(" [~]", Style::default().fg(Color::Cyan)),
+                };
 
-        f.render_widget(input_paragraph, chunks[1]);
-        if !self.agent_running {
-            f.set_cursor(chunks[1].x + self.cursor as u16 + 1, chunks[1].y + 1);
+                diff_lines.push(Line::from(vec![
+                    Span::styled(&hunk.file_path, Style::default().fg(self.theme_fg())),
+                    Span::raw(": "),
+                    Span::styled(&hunk.header, header_style),
+                    state_span,
+                ]));
+
+                for removal in hunk.removals.iter().take(2) {
+                    diff_lines.push(Line::from(vec![
+                        Span::styled("  - ", Style::default().fg(Color::Red)),
+                        Span::styled(removal, Style::default().fg(Color::Red)),
+                    ]));
+                }
+                if hunk.removals.len() > 2 {
+                    diff_lines.push(Line::from(vec![Span::styled(
+                        format!("  ... ({} more removals)", hunk.removals.len() - 2),
+                        Style::default().fg(Color::DarkGray),
+                    )]));
+                }
+
+                for addition in hunk.additions.iter().take(2) {
+                    diff_lines.push(Line::from(vec![
+                        Span::styled("  + ", Style::default().fg(Color::Green)),
+                        Span::styled(addition, Style::default().fg(Color::Green)),
+                    ]));
+                }
+                if hunk.additions.len() > 2 {
+                    diff_lines.push(Line::from(vec![Span::styled(
+                        format!("  ... ({} more additions)", hunk.additions.len() - 2),
+                        Style::default().fg(Color::DarkGray),
+                    )]));
+                }
+            }
+
+            let diff_border_style = Style::default().fg(self.theme_border(self.focus == Focus::Diff));
+            let diff_title = if self.focus == Focus::Diff {
+                "Diff Viewer [↑↓: select, Enter/a: approve, r: reject, Esc: back]"
+            } else {
+                "Diff Viewer"
+            };
+            let diff_paragraph = Paragraph::new(diff_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(diff_border_style)
+                        .title(diff_title),
+                )
+                .style(default_style)
+                .wrap(Wrap { trim: false });
+            f.render_widget(diff_paragraph, left_chunks[1]);
         }
 
-        let status_bar = Paragraph::new(self.status_text())
+        // 3. Render Input Box
+        let input_border_style = if self.focus == Focus::Input {
+            if self.plan_mode {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(self.theme_border(true))
+            }
+        } else {
+            Style::default().fg(self.theme_border(false))
+        };
+        let input_title = if self.plan_mode {
+            "Input [Plan Mode] (Enter queues)"
+        } else if self.agent_running {
+            "Input (busy: Enter queues, Ctrl-C quits)"
+        } else if self.focus == Focus::Input {
+            "Input [Enter: send, Tab: navigate]"
+        } else {
+            "Input"
+        };
+        let input_paragraph = Paragraph::new(self.input.as_str())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(input_border_style)
+                    .title(input_title),
+            )
+            .style(default_style);
+        f.render_widget(input_paragraph, left_chunks[2]);
+        if self.focus == Focus::Input && !self.agent_running {
+            f.set_cursor(left_chunks[2].x + self.cursor as u16 + 1, left_chunks[2].y + 1);
+        }
+
+        // 4. Render Agent Activity Panel (if enabled)
+        if show_panel {
+            let mut agent_lines = Vec::new();
+            agent_lines.push(Line::from(vec![Span::styled(
+                "Parallel Agents (1 active)",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )]));
+            agent_lines.push(Line::from(""));
+
+            if let Some(task) = &self.active_agent_task {
+                let status_icon = if self.agent_running { "●" } else { "○" };
+                let status_color = if self.agent_running { Color::Blue } else { Color::Green };
+                agent_lines.push(Line::from(vec![
+                    Span::styled(status_icon, Style::default().fg(status_color)),
+                    Span::raw(" "),
+                    Span::styled("main", Style::default().fg(self.theme_fg())),
+                    Span::raw(": "),
+                    Span::styled(task, Style::default().fg(Color::Gray)),
+                ]));
+
+                if self.agent_running {
+                    let progress_bar = "████████░░░░░░░░░░░░";
+                    agent_lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(progress_bar, Style::default().fg(status_color)),
+                        Span::styled(" 40%", Style::default().fg(status_color)),
+                    ]));
+                }
+
+                agent_lines.push(Line::from(""));
+                agent_lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("Tool calls: {} | Elapsed: {}s", self.tool_calls_count, self.elapsed_seconds),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]));
+                agent_lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("Status: {}", self.active_agent_status),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+            } else {
+                agent_lines.push(Line::from(vec![Span::styled(
+                    "No active agent task",
+                    Style::default().fg(Color::Gray),
+                )]));
+            }
+
+            let agent_paragraph = Paragraph::new(agent_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(self.theme_border(false)))
+                        .title("Agent Activity"),
+                )
+                .style(default_style)
+                .wrap(Wrap { trim: false });
+            f.render_widget(agent_paragraph, content_chunks[1]);
+        }
+
+        // 5. Render Status Bar
+        let mode_str = if self.plan_mode { "PLAN" } else { "BUILD" };
+        let mode_color = if self.plan_mode { Color::Yellow } else { Color::Green };
+        let focus_str = match self.focus {
+            Focus::Input => "INPUT",
+            Focus::Diff => "DIFF",
+            Focus::Conversation => "CHAT",
+        };
+        let status_color = if self.agent_running { Color::Yellow } else { Color::Green };
+        let status_str = if self.agent_running { "WORKING" } else { "READY" };
+
+        let line = Line::from(vec![
+            Span::styled(" Mode: ", Style::default().fg(self.theme_fg())),
+            Span::styled(mode_str, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
+            Span::raw(" │ Focus: "),
+            Span::styled(focus_str, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" │ Status: "),
+            Span::styled(status_str, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::raw(" │ Queued: "),
+            Span::styled(self.queued_messages.len().to_string(), Style::default().fg(self.theme_fg())),
+            Span::raw(" │ Tokens: "),
+            Span::styled(
+                format!("{}/{}", self.token_used, self.token_budget),
+                Style::default().fg(Color::Green),
+            ),
+        ]);
+        let status_bar = Paragraph::new(line)
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
-        f.render_widget(status_bar, chunks[2]);
+        f.render_widget(status_bar, main_chunks[2]);
     }
 }
 
@@ -729,5 +1258,36 @@ mod tests {
         let out = truncate_for_display(&long, 10);
         assert!(out.contains("truncated"));
         assert!(out.chars().count() < long.len());
+    }
+
+    #[tokio::test]
+    async fn test_streaming_simulation() {
+        let mut tui = test_tui();
+        use forge_core::LoopEvent;
+        tui.handle_loop_event(LoopEvent::AssistantMessage {
+            step: 0,
+            content: "hello world".to_string(),
+        });
+        
+        assert_eq!(tui.conversation.len(), 1);
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert!(text.is_empty());
+        } else {
+            panic!("Expected Assistant entry");
+        }
+        
+        tui.poll_agent_updates().await;
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert_eq!(text, "hello wo");
+        } else {
+            panic!("Expected Assistant entry");
+        }
+
+        tui.poll_agent_updates().await;
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert_eq!(text, "hello world");
+        } else {
+            panic!("Expected Assistant entry");
+        }
     }
 }

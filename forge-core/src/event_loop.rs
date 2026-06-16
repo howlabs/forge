@@ -377,7 +377,7 @@ impl Default for ToolPolicy {
 /// Core event loop: observe -> think -> act
 pub struct EventLoop<P: ModelProvider> {
     provider: P,
-    context: ContextEngine,
+    context: Arc<Mutex<ContextEngine>>,
     sandbox: Sandbox,
     running: bool,
     task: String,
@@ -396,16 +396,17 @@ pub struct EventLoop<P: ModelProvider> {
 
 impl<P: ModelProvider> EventLoop<P> {
     pub fn new(provider: P, context: ContextEngine, sandbox: Sandbox, task: String) -> Self {
+        let context_arc = Arc::new(Mutex::new(context));
         Self {
             provider,
-            context,
+            context: context_arc.clone(),
             sandbox,
             running: true,
             task,
             history: Vec::new(),
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
-            context_index: None,
+            context_index: Some(context_arc),
             mcp_client: None,
             mcp_tools: Vec::new(),
             mcp_server: None,
@@ -545,8 +546,31 @@ impl<P: ModelProvider> EventLoop<P> {
     pub async fn run(&mut self) -> Result<usize> {
         info!("Starting event loop");
 
+        if self.task.starts_with("Resume task ") {
+            let task_id = self.task.trim_start_matches("Resume task ").to_string();
+            let path = std::path::PathBuf::from(".forge/checkpoints").join(format!("{}.checkpoint", task_id));
+            if path.exists() {
+                if let Ok(data) = std::fs::read(&path) {
+                    #[derive(serde::Deserialize)]
+                    struct LoopCheckpoint {
+                        task_id: String,
+                        step: u32,
+                        state: Vec<u8>,
+                    }
+                    if let Ok(checkpoint) = serde_json::from_slice::<LoopCheckpoint>(&data) {
+                        if let Ok(history) = serde_json::from_slice::<Vec<Message>>(&checkpoint.state) {
+                            self.task = checkpoint.task_id;
+                            self.history = history;
+                            self.steps = checkpoint.step as usize;
+                            info!("Resumed task {} from checkpoint at step {}", self.task, self.steps);
+                        }
+                    }
+                }
+            }
+        }
+
         if self.history.is_empty() {
-            self.history.push(Message::system(self.get_system_prompt()));
+            self.history.push(Message::system(self.get_system_prompt().await));
             self.history.push(Message::user(self.task.clone()));
         }
 
@@ -564,6 +588,8 @@ impl<P: ModelProvider> EventLoop<P> {
             self.history
                 .push(Message::assistant(response.content.clone()));
             self.steps += 1;
+
+            let _ = self.save_checkpoint();
 
             if !response.content.is_empty() {
                 self.emit(LoopEvent::AssistantMessage {
@@ -636,7 +662,7 @@ impl<P: ModelProvider> EventLoop<P> {
         ))
     }
 
-    fn get_system_prompt(&self) -> String {
+    async fn get_system_prompt(&self) -> String {
         let mut sections = vec![BASE_SYSTEM_PROMPT.to_string()];
 
         // Layer AGENTS.md on top if present
@@ -649,7 +675,7 @@ impl<P: ModelProvider> EventLoop<P> {
         }
 
         // Relevant code context from semantic retrieval
-        let context_chunks = self.context.retrieve(&self.task, 5).unwrap_or_default();
+        let context_chunks = self.context.lock().await.retrieve(&self.task, 5).unwrap_or_default();
         if !context_chunks.is_empty() {
             let chunks_text = context_chunks
                 .iter()
@@ -674,6 +700,32 @@ impl<P: ModelProvider> EventLoop<P> {
         }
 
         sections.join("")
+    }
+
+    fn save_checkpoint(&self) -> Result<()> {
+        let store_dir = std::path::PathBuf::from(".forge/checkpoints");
+        std::fs::create_dir_all(&store_dir)?;
+        let state_bytes = serde_json::to_vec(&self.history)?;
+        
+        #[derive(serde::Serialize)]
+        struct LoopCheckpoint {
+            task_id: String,
+            step: u32,
+            state: Vec<u8>,
+            timestamp: std::time::SystemTime,
+        }
+
+        let checkpoint = LoopCheckpoint {
+            task_id: self.task.clone(),
+            step: self.steps as u32,
+            state: state_bytes,
+            timestamp: std::time::SystemTime::now(),
+        };
+
+        let path = store_dir.join(format!("{}.checkpoint", self.task));
+        let data = serde_json::to_vec_pretty(&checkpoint)?;
+        std::fs::write(path, data)?;
+        Ok(())
     }
 
     // Removed unused default_system_prompt; get_system_prompt now always loads AGENTS.md.
@@ -1094,8 +1146,8 @@ mod tests {
         assert_eq!(result, "Unknown tool: external_tool");
     }
 
-    #[test]
-    fn test_mcp_tools_injected_into_system_prompt() {
+    #[tokio::test]
+    async fn test_mcp_tools_injected_into_system_prompt() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let provider = MockProvider::new(vec![]);
         let context = ContextEngine::new(temp_dir.path()).unwrap();
@@ -1107,7 +1159,7 @@ mod tests {
             input_schema: serde_json::json!({"type": "object"}),
         }];
 
-        let prompt = event_loop.get_system_prompt();
+        let prompt = event_loop.get_system_prompt().await;
 
         assert!(prompt.contains("## External MCP Tools"));
         assert!(prompt.contains("### search_docs (MCP)"));
@@ -1212,5 +1264,36 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("REJECTED edit"));
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_save_and_resume() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let old_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        let provider = MockProvider::new(vec![chat_response("step 1 response", vec![])]);
+        let context = ContextEngine::new(temp_dir.path()).unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+        
+        let mut event_loop = EventLoop::new(provider, context, sandbox, "task-123".to_string());
+        let _ = event_loop.run().await.unwrap();
+
+        let checkpoint_path = std::path::PathBuf::from(".forge/checkpoints").join("task-123.checkpoint");
+        assert!(checkpoint_path.exists());
+
+        let provider2 = MockProvider::new(vec![chat_response("step 2 response", vec![])]);
+        let context2 = ContextEngine::new(temp_dir.path()).unwrap();
+        let sandbox2 = Sandbox::new(temp_dir.path(), "on").unwrap();
+        
+        let mut resume_loop = EventLoop::new(provider2, context2, sandbox2, "Resume task task-123".to_string());
+        let steps2 = resume_loop.run().await.unwrap();
+        
+        assert_eq!(steps2, 2);
+        assert_eq!(resume_loop.task, "task-123");
+        assert_eq!(resume_loop.steps, 2);
+        assert_eq!(resume_loop.history.len(), 4);
+
+        std::env::set_current_dir(old_dir).unwrap();
     }
 }
