@@ -325,6 +325,37 @@ what the build actually ships.
 /// Default maximum steps to prevent infinite loops
 const DEFAULT_MAX_STEPS: usize = 200;
 
+/// Progress event emitted by the event loop for live observers (e.g. the TUI).
+///
+/// These are best-effort notifications: the loop never blocks on, and never
+/// fails because of, a closed observer channel. They carry no control
+/// semantics — they exist purely so a front-end can show what is happening
+/// step by step (assistant text, tool calls, command output, diffs, verify).
+#[derive(Debug, Clone)]
+pub enum LoopEvent {
+    /// The assistant produced a (possibly empty) text message this step.
+    AssistantMessage { step: usize, content: String },
+    /// A tool is about to run.
+    ToolStarted { name: String },
+    /// A tool finished; `result` is the rendered output or error text.
+    ToolCompleted {
+        name: String,
+        result: String,
+        is_error: bool,
+    },
+    /// A diff_edit was applied: a unified-ish before/after for the UI.
+    DiffApplied {
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
+    /// A verify run completed.
+    VerifyResult { passed: bool, logs: String },
+}
+
+/// Best-effort sender for [`LoopEvent`]s.
+pub type LoopEventSender = tokio::sync::mpsc::UnboundedSender<LoopEvent>;
+
 /// Core event loop: observe -> think -> act
 pub struct EventLoop<P: ModelProvider> {
     provider: P,
@@ -340,6 +371,8 @@ pub struct EventLoop<P: ModelProvider> {
     mcp_client: Option<Arc<Mutex<McpClient>>>,
     mcp_tools: Vec<McpTool>,
     mcp_server: Option<SharedMcpServer>,
+    /// Optional observer for live progress events (e.g. the TUI).
+    observer: Option<LoopEventSender>,
 }
 
 impl<P: ModelProvider> EventLoop<P> {
@@ -357,6 +390,7 @@ impl<P: ModelProvider> EventLoop<P> {
             mcp_client: None,
             mcp_tools: Vec::new(),
             mcp_server: None,
+            observer: None,
         }
     }
 
@@ -364,6 +398,20 @@ impl<P: ModelProvider> EventLoop<P> {
     pub fn with_context_index(mut self, context_index: Arc<Mutex<dyn ContextIndex>>) -> Self {
         self.context_index = Some(context_index);
         self
+    }
+
+    /// Attach a live progress observer. Events are best-effort; a closed
+    /// receiver never affects the loop.
+    pub fn with_observer(mut self, observer: LoopEventSender) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Emit a [`LoopEvent`] to the observer if one is attached. Never fails.
+    fn emit(&self, event: LoopEvent) {
+        if let Some(tx) = &self.observer {
+            let _ = tx.send(event);
+        }
     }
 
     pub async fn with_mcp_client(mut self, command: String, args: Vec<String>) -> Result<Self> {
@@ -468,13 +516,29 @@ impl<P: ModelProvider> EventLoop<P> {
                 .push(Message::assistant(response.content.clone()));
             self.steps += 1;
 
+            if !response.content.is_empty() {
+                self.emit(LoopEvent::AssistantMessage {
+                    step: self.steps,
+                    content: response.content.clone(),
+                });
+            }
+
             if !response.tool_calls.is_empty() {
                 for tool_call in response.tool_calls {
+                    let tool_name = tool_call.name.clone();
+                    self.emit(LoopEvent::ToolStarted {
+                        name: tool_name.clone(),
+                    });
                     let result = self.execute_tool_with_result(tool_call).await;
-                    let tool_result_msg = match result {
-                        Ok(output) => format!("Tool result: {}", output),
-                        Err(e) => format!("Tool error: {}", e),
+                    let (tool_result_msg, is_error, rendered) = match result {
+                        Ok(output) => (format!("Tool result: {}", output), false, output),
+                        Err(e) => (format!("Tool error: {}", e), true, e.to_string()),
                     };
+                    self.emit(LoopEvent::ToolCompleted {
+                        name: tool_name,
+                        result: rendered,
+                        is_error,
+                    });
                     self.history.push(Message::user(tool_result_msg));
                 }
             } else {
@@ -496,6 +560,10 @@ impl<P: ModelProvider> EventLoop<P> {
 
         for attempt in 0..max_retries {
             let report = verifier.verify(workdir).await?;
+            self.emit(LoopEvent::VerifyResult {
+                passed: report.passed,
+                logs: report.logs.clone(),
+            });
             if report.passed {
                 info!("Verify passed after {} steps", self.steps);
                 return Ok(self.steps);
@@ -624,6 +692,11 @@ impl<P: ModelProvider> EventLoop<P> {
 
         self.sandbox.diff_edit(&path, &old_text, &new_text).await?;
         debug!("Diff edit applied to {}", path);
+        self.emit(LoopEvent::DiffApplied {
+            path: path.clone(),
+            old_text,
+            new_text,
+        });
         Ok(format!("Successfully applied diff edit to {}", path))
     }
 

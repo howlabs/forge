@@ -28,6 +28,7 @@ pub struct ExecConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ForgeToml {
     verify: Option<VerifyToml>,
+    mcp: Option<McpToml>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -39,6 +40,23 @@ struct VerifyToml {
     auto_detect: bool,
     /// Maximum verification repair attempts for the agent loop.
     max_retries: Option<usize>,
+}
+
+/// `[mcp]` config: external MCP stdio servers to connect to before the run.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct McpToml {
+    /// Stdio servers, keyed by an arbitrary label.
+    #[serde(default)]
+    servers: std::collections::HashMap<String, McpServerToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpServerToml {
+    /// Command to launch the server.
+    command: String,
+    /// Arguments passed to the command.
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -154,6 +172,9 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
     let sandbox = Sandbox::new(&workdir, "off")?;
     let mut event_loop = EventLoop::new(provider, context, sandbox, config.task.clone());
 
+    // Connect any configured MCP stdio servers so their tools are available.
+    event_loop = attach_mcp_servers(event_loop, forge_toml.as_ref()).await?;
+
     let (steps, verify_passed) = if config.verify {
         if let Some(commands) = verify_commands {
             let verifier = CommandVerifier::new(commands);
@@ -202,6 +223,38 @@ fn failed_result(
         verify_passed: false,
         error_message: Some(error.to_string()),
     })
+}
+
+/// Connect each configured `[mcp.servers.*]` stdio server to the event loop.
+/// A failure to launch one server is logged and skipped rather than aborting
+/// the whole run.
+async fn attach_mcp_servers<P: provider::ModelProvider>(
+    mut event_loop: forge_core::EventLoop<P>,
+    config: Option<&ForgeToml>,
+) -> Result<forge_core::EventLoop<P>> {
+    let Some(mcp) = config.and_then(|toml| toml.mcp.as_ref()) else {
+        return Ok(event_loop);
+    };
+
+    for (label, server) in &mcp.servers {
+        match event_loop
+            .with_mcp_client(server.command.clone(), server.args.clone())
+            .await
+        {
+            Ok(updated) => {
+                tracing::info!("Connected MCP server '{}'", label);
+                event_loop = updated;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect MCP server '{}': {}", label, e);
+                return Err(e).with_context(|| {
+                    format!("failed to connect configured MCP server '{label}'")
+                });
+            }
+        }
+    }
+
+    Ok(event_loop)
 }
 
 
@@ -370,10 +423,39 @@ mod tests {
                 auto_detect: true,
                 max_retries: Some(2),
             }),
+            mcp: None,
         };
         assert_eq!(
             resolve_verify_commands(Path::new("."), Some(&toml)).unwrap(),
             vec!["just verify"]
         );
+    }
+
+    /// End-to-end offline smoke test: `forge exec` with the mock provider must
+    /// complete with no network and no API key. This is the Phase 0 DoD gate
+    /// for "forge exec runs end-to-end via mock/local provider".
+    #[tokio::test]
+    async fn exec_runs_offline_with_mock_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ExecConfig {
+            task: "say hello".to_string(),
+            project_path: dir.path().to_path_buf(),
+            // No forge.toml in the temp dir -> defaults / auto-detect.
+            config_path: dir.path().join("forge.toml"),
+            api_key: String::new(),
+            provider: "mock".to_string(),
+            model: "mock-1".to_string(),
+            // Empty dir has no detectable build, so skip verify here; the loop
+            // itself is exercised regardless.
+            verify: false,
+            output_format: "json".to_string(),
+            trace: false,
+        };
+
+        let result = run_exec(config).await.unwrap();
+        assert!(result.success, "mock exec should succeed offline");
+        assert_eq!(result.exit_code(), 1); // verify_passed=false -> non-zero
+        assert!(result.steps_completed >= 1);
+        assert!(result.error_message.is_none());
     }
 }

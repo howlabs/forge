@@ -1,11 +1,13 @@
 pub mod anthropic;
 pub mod gemini;
+pub mod mock;
 pub mod openai;
 pub mod traits;
 pub mod types;
 
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
+pub use mock::MockProvider;
 pub use openai::OpenAIProvider;
 pub use traits::{ModelProvider, StreamingProvider};
 pub use types::{ChatResponse, Message, StreamEvent, TokenUsage, ToolCall, ToolResponse};
@@ -72,6 +74,7 @@ pub fn create_provider(
     match name.to_lowercase().as_str() {
         "anthropic" => Ok(Arc::new(AnthropicProvider::new(api_key, model)?)),
         "gemini" => Ok(Arc::new(GeminiProvider::new(model, api_key))),
+        "mock" | "local" => Ok(Arc::new(MockProvider::new(model))),
         _ => {
             if let Some(entry) = find_provider(name) {
                 Ok(Arc::new(create_openai_compatible(entry, model, api_key)))

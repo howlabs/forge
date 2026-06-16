@@ -37,5 +37,13 @@ enabled = true
 # Run cargo test and cargo build
 commands = ["cargo test", "cargo build"]
 
+# External MCP stdio servers to connect before a run. Each entry launches the
+# given command and exposes its tools to the agent. Forge can also act as a
+# server: `forge mcp serve` speaks line-delimited JSON-RPC over stdio.
+#
+# [mcp.servers.forge-self]
+# command = "forge"
+# args = ["mcp", "serve", "--project-path", "."]
+
 [logging]
 level = "info"

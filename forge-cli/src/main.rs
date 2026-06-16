@@ -9,7 +9,9 @@ use tracing_subscriber::EnvFilter;
 
 use agents::Orchestrator;
 
+mod doctor;
 mod exec;
+mod mcp;
 
 use exec::{run_exec, ExecConfig};
 
@@ -36,11 +38,12 @@ enum Commands {
         #[arg(short, long, default_value = "forge.toml")]
         config: String,
 
-        /// API key for the model provider
+        /// API key for the model provider. Optional for the `mock`/`local`
+        /// providers and when the provider's env var is set.
         #[arg(short, long)]
-        api_key: String,
+        api_key: Option<String>,
 
-        /// Model provider (anthropic, openai, zai, gemini, local)
+        /// Model provider (anthropic, openai, zai, gemini, local, mock)
         #[arg(long, default_value = "zai")]
         provider: String,
 
@@ -81,11 +84,12 @@ enum Commands {
         #[arg(short, long, default_value = "forge.toml")]
         config: String,
 
-        /// API key for the model provider
+        /// API key for the model provider. Optional for the `mock`/`local`
+        /// providers and when the provider's env var is set.
         #[arg(short, long)]
-        api_key: String,
+        api_key: Option<String>,
 
-        /// Model provider (anthropic, openai, zai, gemini, local)
+        /// Model provider (anthropic, openai, zai, gemini, local, mock)
         #[arg(long, default_value = "zai")]
         provider: String,
 
@@ -94,7 +98,7 @@ enum Commands {
         model: String,
 
         /// Run verify loop
-        #[arg(long, default_value_t = true)]
+        #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
         verify: bool,
 
         /// Output format
@@ -109,6 +113,43 @@ enum Commands {
     Agents {
         #[command(subcommand)]
         action: AgentAction,
+    },
+    /// Diagnose the environment: provider keys, git, cargo, sandbox, config
+    Doctor {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Configuration file path
+        #[arg(short, long, default_value = "forge.toml")]
+        config: String,
+
+        /// Network access mode to report on (off, on, auto)
+        #[arg(short, long, default_value = "off")]
+        network: String,
+
+        /// Emit machine-readable JSON instead of the text report
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Model Context Protocol: run Forge as an MCP stdio server
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpAction {
+    /// Serve Forge's built-in tools over MCP stdio (line-delimited JSON-RPC)
+    Serve {
+        /// Path to the project directory exposed to MCP tools
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Network access mode for sandbox-backed tools (off, on, auto)
+        #[arg(short, long, default_value = "off")]
+        network: String,
     },
 }
 
@@ -182,6 +223,8 @@ async fn main() -> Result<()> {
                 return resume_task(&task_id, &project_path);
             }
 
+            let api_key = resolve_api_key(&provider, api_key)?;
+
             // Provider will be resolved via registry
 
             // Initialize context engine (minimal: AGENTS.md loading)
@@ -238,6 +281,8 @@ async fn main() -> Result<()> {
             trace,
         } => {
             tracing::info!("Forge v{} starting (exec mode)", env!("CARGO_PKG_VERSION"));
+
+            let api_key = resolve_api_key(&provider, api_key)?;
 
             let exec_config = ExecConfig {
                 task,
@@ -376,11 +421,72 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Doctor {
+            project_path,
+            config,
+            network,
+            json,
+        } => {
+            let exit_code = doctor::run(&doctor::DoctorConfig {
+                project_path,
+                config_path: config,
+                network,
+                json,
+            });
+            std::process::exit(exit_code);
+        }
+        Commands::Mcp { action } => match action {
+            McpAction::Serve {
+                project_path,
+                network,
+            } => {
+                tracing::info!("Starting Forge MCP stdio server");
+                mcp::serve(project_path, network).await
+            }
+        },
     }
 }
 
 pub fn create_provider_instance(name: &str, model: &str, api_key: &str) -> Result<Arc<dyn ModelProvider>> {
     provider::create_provider(name, model, api_key)
+}
+
+/// Resolve the API key for a provider from, in order: the explicit `--api-key`
+/// flag, the provider's registered environment variable, or an empty string for
+/// providers that need no credentials (`mock`/`local`). Errors when a key is
+/// genuinely required but missing.
+fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> Result<String> {
+    if let Some(key) = explicit.filter(|k| !k.is_empty()) {
+        return Ok(key);
+    }
+
+    let lower = provider_name.to_lowercase();
+    if lower == "mock" || lower == "local" {
+        return Ok(String::new());
+    }
+
+    // Provider-specific env var from the registry, with sensible fallbacks for
+    // the providers that have dedicated constructors.
+    let env_var = provider::find_provider(&lower)
+        .map(|entry| entry.env_var.to_string())
+        .unwrap_or_else(|| match lower.as_str() {
+            "anthropic" => "ANTHROPIC_API_KEY".to_string(),
+            "gemini" => "GEMINI_API_KEY".to_string(),
+            _ => "FORGE_API_KEY".to_string(),
+        });
+
+    if let Ok(key) = std::env::var(&env_var) {
+        if !key.is_empty() {
+            return Ok(key);
+        }
+    }
+
+    anyhow::bail!(
+        "No API key for provider '{}'. Pass --api-key or set {}. \
+         (Use --provider mock for offline runs.)",
+        provider_name,
+        env_var
+    )
 }
 
 /// Launch TUI mode with configured provider

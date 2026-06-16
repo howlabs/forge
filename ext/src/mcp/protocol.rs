@@ -40,6 +40,9 @@ impl JsonRpcError {
     pub fn parse_error() -> Self {
         Self { code: -32700, message: "Parse error".into(), data: None }
     }
+    pub fn parse_error_with(msg: &str) -> Self {
+        Self { code: -32700, message: format!("Parse error: {}", msg), data: None }
+    }
     pub fn invalid_request() -> Self {
         Self { code: -32600, message: "Invalid Request".into(), data: None }
     }
