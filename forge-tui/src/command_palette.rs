@@ -40,6 +40,8 @@ pub enum SlashCommand {
     Init,
     /// Show help: /help
     Help,
+    /// Change theme: /theme <dark|light|safe>
+    Theme { theme: String },
 }
 
 impl SlashCommand {
@@ -76,6 +78,9 @@ impl SlashCommand {
             },
             "init" => SlashCommand::Init,
             "help" => SlashCommand::Help,
+            "theme" if parts.len() > 1 => SlashCommand::Theme {
+                theme: parts[1].to_string(),
+            },
             _ => return None,
         })
     }
@@ -94,6 +99,7 @@ impl SlashCommand {
             SlashCommand::Review { .. } => "Request code review".to_string(),
             SlashCommand::Init => "Initialize Forge in current directory".to_string(),
             SlashCommand::Help => "Show this help message".to_string(),
+            SlashCommand::Theme { .. } => "Change TUI theme (dark/light/safe)".to_string(),
         }
     }
 }
@@ -177,6 +183,7 @@ impl CommandPalette {
             "/plan",
             "/review [path]",
             "/init",
+            "/theme <dark|light|safe>",
             "/help",
         ]
     }

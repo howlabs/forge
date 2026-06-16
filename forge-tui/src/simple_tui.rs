@@ -25,6 +25,7 @@ use std::time::Duration;
 use crate::TuiConfig;
 use provider::ModelProvider;
 use crate::panels::diff_viewer::{DiffHunk, HunkState};
+use crate::command_palette::SlashCommand;
 
 #[derive(Clone)]
 pub enum ConversationEntry {
@@ -375,40 +376,62 @@ impl SimpleTui {
         self.cursor = 0;
 
         let trimmed = user_message.trim();
-        if trimmed == "/plan" {
-            self.plan_mode = !self.plan_mode;
-            let status = if self.plan_mode { "enabled" } else { "disabled" };
-            self.add_entry(ConversationEntry::System(format!("Plan mode {}", status)));
-            return;
-        }
-
-        if trimmed == "/help" || trimmed == "/?" {
-            self.show_help();
-            return;
-        }
-
-        if trimmed.starts_with("/theme") {
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.len() > 1 {
-                match parts[1] {
-                    "dark" => {
-                        self.theme_mode = ThemeMode::Dark;
-                        self.add_entry(ConversationEntry::System("Theme changed to dark".to_string()));
+        if trimmed.starts_with('/') {
+            if let Some(cmd) = SlashCommand::parse(trimmed) {
+                match cmd {
+                    SlashCommand::Plan => {
+                        self.plan_mode = !self.plan_mode;
+                        let status = if self.plan_mode { "enabled" } else { "disabled" };
+                        self.add_entry(ConversationEntry::System(format!("Plan mode {}", status)));
                     }
-                    "light" => {
-                        self.theme_mode = ThemeMode::Light;
-                        self.add_entry(ConversationEntry::System("Theme changed to light".to_string()));
+                    SlashCommand::Help => {
+                        self.show_help();
                     }
-                    "safe" => {
-                        self.theme_mode = ThemeMode::Safe;
-                        self.add_entry(ConversationEntry::System("Theme changed to safe (high compatibility)".to_string()));
+                    SlashCommand::Theme { theme } => {
+                        match theme.as_str() {
+                            "dark" => {
+                                self.theme_mode = ThemeMode::Dark;
+                                self.add_entry(ConversationEntry::System("Theme changed to dark".to_string()));
+                            }
+                            "light" => {
+                                self.theme_mode = ThemeMode::Light;
+                                self.add_entry(ConversationEntry::System("Theme changed to light".to_string()));
+                            }
+                            "safe" => {
+                                self.theme_mode = ThemeMode::Safe;
+                                self.add_entry(ConversationEntry::System("Theme changed to safe (high compatibility)".to_string()));
+                            }
+                            _ => {
+                                self.add_entry(ConversationEntry::System("Unknown theme. Available: dark, light, safe".to_string()));
+                            }
+                        }
                     }
-                    _ => {
-                        self.add_entry(ConversationEntry::System("Unknown theme. Available: dark, light, safe".to_string()));
+                    SlashCommand::Model { model } => {
+                        self.add_entry(ConversationEntry::System(format!("Model changed to {}", model)));
                     }
+                    SlashCommand::Resume { task_id } => {
+                        self.add_entry(ConversationEntry::System(format!("Resuming task from checkpoint: {}", task_id)));
+                        self.start_agent_task(format!("Resume task {}", task_id));
+                    }
+                    SlashCommand::Diff { .. } => {
+                        if !self.diff_hunks.is_empty() {
+                            self.focus = Focus::Diff;
+                        } else {
+                            self.add_entry(ConversationEntry::System("No active diff to view".to_string()));
+                        }
+                    }
+                    SlashCommand::Context { action, path } => {
+                        let path_str = path.unwrap_or_else(|| "current directory".to_string());
+                        self.add_entry(ConversationEntry::System(format!("Context action '{}' on '{}'", action, path_str)));
+                    }
+                    SlashCommand::Agents { action, agent_id } => {
+                        let id_str = agent_id.unwrap_or_else(|| "all".to_string());
+                        self.add_entry(ConversationEntry::System(format!("Agent action '{}' on '{}'", action, id_str)));
+                    }
+                    _ => {}
                 }
             } else {
-                self.add_entry(ConversationEntry::System("Usage: /theme <dark|light|safe>".to_string()));
+                self.add_entry(ConversationEntry::System(format!("Unknown command: {}", trimmed)));
             }
             return;
         }
@@ -1137,6 +1160,66 @@ impl SimpleTui {
         let status_bar = Paragraph::new(line)
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
         f.render_widget(status_bar, main_chunks[2]);
+
+        self.render_autocomplete_popup(f, left_chunks[2]);
+    }
+
+    fn render_autocomplete_popup(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        if !self.input.starts_with('/') || self.focus != Focus::Input {
+            return;
+        }
+
+        let query = &self.input;
+        let commands = [
+            "/model <name>",
+            "/context <add|remove|list> [path]",
+            "/agents <list|kill> [id]",
+            "/resume <task_id>",
+            "/diff [path]",
+            "/plan",
+            "/review [path]",
+            "/init",
+            "/theme <dark|light|safe>",
+            "/help",
+        ];
+
+        let filtered: Vec<&str> = commands
+            .iter()
+            .filter(|cmd| cmd.starts_with(query))
+            .copied()
+            .collect();
+
+        if filtered.is_empty() {
+            return;
+        }
+
+        let height = (filtered.len() + 2) as u16;
+        let width = 45;
+        let popup_area = ratatui::layout::Rect {
+            x: area.x + 1,
+            y: area.y.saturating_sub(height),
+            width,
+            height,
+        };
+
+        let mut lines = Vec::new();
+        for cmd in filtered {
+            lines.push(Line::from(vec![
+                Span::styled(cmd, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            ]));
+        }
+
+        let block = Block::default()
+            .title("Commands")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().bg(self.theme_bg()));
+
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+        f.render_widget(paragraph, popup_area);
     }
 }
 
