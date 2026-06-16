@@ -1668,24 +1668,41 @@ impl SimpleTui {
                 }
             }
 
+            let badge_width = match entry {
+                ConversationEntry::User(_) => 7,
+                ConversationEntry::Assistant(_) => 9,
+                ConversationEntry::System(_) => 10,
+                ConversationEntry::ToolCall { name, .. } => 8 + name.chars().count(),
+                ConversationEntry::Diff { path, .. } => 8 + path.chars().count(),
+                ConversationEntry::VerifyResult { passed, .. } => if *passed { 12 } else { 10 },
+            };
+            let line_width = (left_chunks[0].width.saturating_sub(6) as usize)
+                .saturating_sub(badge_width);
+            let line_str = "─".repeat(line_width);
+
             // Header line for each message
             let header_line = Line::from(vec![
                 label_span.clone(),
-                Span::styled(" ────────────────────────────────────────", Style::default().fg(Color::DarkGray))
+                Span::styled(format!(" {line_str}"), Style::default().fg(Color::DarkGray))
             ]);
             conversation_lines.push(header_line);
 
+            let pane_width = left_chunks[0].width.saturating_sub(2) as usize;
             for line in lines {
                 let trimmed = line.trim();
                 if trimmed.starts_with("```") {
                     in_code_block = !in_code_block;
                     if in_code_block {
+                        let top_line_width = pane_width.saturating_sub(13);
+                        let top_line = "─".repeat(top_line_width);
                         conversation_lines.push(Line::from(vec![
-                            Span::styled("  ┌── CODE ─────────────────────────────────────────", Style::default().fg(Color::DarkGray))
+                            Span::styled(format!("  ┌── CODE {top_line}"), Style::default().fg(Color::DarkGray))
                         ]));
                     } else {
+                        let bottom_line_width = pane_width.saturating_sub(3);
+                        let bottom_line = "─".repeat(bottom_line_width);
                         conversation_lines.push(Line::from(vec![
-                            Span::styled("  └─────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))
+                            Span::styled(format!("  └{bottom_line}"), Style::default().fg(Color::DarkGray))
                         ]));
                     }
                     continue;
@@ -2941,5 +2958,39 @@ mod tests {
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())).await;
         
         assert_eq!(tui.provider.model(), "custom-model");
+    }
+
+    #[tokio::test]
+    async fn test_dump_tui_rendering() {
+        let mut tui = test_tui();
+        tui.add_entry(ConversationEntry::User("hello agent, please help me fix the layout.".to_string()));
+        tui.add_entry(ConversationEntry::Assistant("I am editing simple_tui.rs to improve alignment and layout.\nHere is the diff of the changes:".to_string()));
+        tui.add_entry(ConversationEntry::System("Verification tests passed successfully.".to_string()));
+        tui.diff_hunks = vec![
+            DiffHunk {
+                file_path: "src/main.rs".to_string(),
+                header: "@@ -1,5 +1,6 @@".to_string(),
+                removals: vec!["println!(\"old content\");".to_string()],
+                additions: vec!["println!(\"new layout content\");".to_string()],
+                state: HunkState::Pending,
+            }
+        ];
+        
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        
+        terminal.draw(|f| tui.render(f)).unwrap();
+        
+        let mut dump = String::new();
+        let buffer = terminal.backend().buffer();
+        for y in 0..24 {
+            for x in 0..80 {
+                let cell = buffer.get(x, y);
+                dump.push_str(cell.symbol());
+            }
+            dump.push('\n');
+        }
+        
+        std::fs::write("/home/syr/.gemini/antigravity-cli/brain/3a9239d8-12f5-4511-81f3-ee325c94e554/scratch/tui_dump.txt", dump).unwrap();
     }
 }
