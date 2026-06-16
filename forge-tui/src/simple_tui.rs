@@ -21,6 +21,8 @@ use ratatui::{
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::TuiConfig;
 use provider::ModelProvider;
@@ -108,6 +110,61 @@ pub enum ThemeMode {
     Safe,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenCodeConfig {
+    pub provider: Option<HashMap<String, OpenCodeProvider>>,
+    pub model: Option<String>,
+    #[serde(rename = "small_model")]
+    pub small_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenCodeProvider {
+    pub options: Option<OpenCodeProviderOptions>,
+    pub models: Option<HashMap<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OpenCodeProviderOptions {
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
+    #[serde(rename = "baseURL")]
+    pub base_url: Option<String>,
+}
+
+fn strip_jsonc_comments(jsonc: &str) -> String {
+    let mut clean = String::new();
+    for line in jsonc.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        clean.push_str(line);
+        clean.push('\n');
+    }
+    clean
+}
+
+fn load_opencode_config() -> Option<OpenCodeConfig> {
+    let home = std::env::var("HOME").ok()?;
+    let config_paths = vec![
+        std::path::PathBuf::from(&home).join(".config").join("opencode").join("opencode.json"),
+        std::path::PathBuf::from(&home).join(".config").join("opencode").join("opencode.jsonc"),
+    ];
+
+    for path in config_paths {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let clean_content = strip_jsonc_comments(&content);
+                if let Ok(config) = serde_json::from_str::<OpenCodeConfig>(&clean_content) {
+                    return Some(config);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Simple TUI that works with real providers
 pub struct SimpleTui {
     _config: TuiConfig,
@@ -147,6 +204,7 @@ pub struct SimpleTui {
     did_stream_chunk: bool,
     connect_popup: ConnectPopupState,
     show_agent_panel: bool,
+    opencode_config: Option<OpenCodeConfig>,
 }
 
 fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> String {
@@ -173,7 +231,29 @@ fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> String {
 impl SimpleTui {
     /// Create new SimpleTui with provider
     pub fn new(config: TuiConfig, provider: Arc<dyn ModelProvider>) -> Self {
-        Self {
+        let opencode_config = load_opencode_config();
+        
+        let mut providers = vec![
+            "anthropic".to_string(),
+            "gemini".to_string(),
+            "mock".to_string(),
+        ];
+        for p in provider::PROVIDERS {
+            providers.push(p.name.to_string());
+        }
+        
+        // Add providers from opencode.json
+        if let Some(config) = &opencode_config {
+            if let Some(prov_map) = &config.provider {
+                for name in prov_map.keys() {
+                    providers.push(name.clone());
+                }
+            }
+        }
+        providers.sort();
+        providers.dedup();
+
+        let mut tui = Self {
             _config: config.clone(),
             provider,
             conversation: Vec::new(),
@@ -207,30 +287,21 @@ impl SimpleTui {
             autocomplete_options: Vec::new(),
             autocomplete_index: 0,
             did_stream_chunk: false,
-            connect_popup: {
-                let mut providers = vec![
-                    "anthropic".to_string(),
-                    "gemini".to_string(),
-                    "mock".to_string(),
-                ];
-                for p in provider::PROVIDERS {
-                    providers.push(p.name.to_string());
-                }
-                providers.sort();
-                providers.dedup();
-                
-                ConnectPopupState {
-                    active: false,
-                    providers,
-                    selected_provider_idx: 0,
-                    models: Vec::new(),
-                    selected_model_idx: 0,
-                    api_key: String::new(),
-                    active_field: ConnectPopupField::Provider,
-                }
+            connect_popup: ConnectPopupState {
+                active: false,
+                providers,
+                selected_provider_idx: 0,
+                models: Vec::new(),
+                selected_model_idx: 0,
+                api_key: String::new(),
+                active_field: ConnectPopupField::Provider,
             },
             show_agent_panel: config.show_agent_panel,
-        }
+            opencode_config,
+        };
+
+        tui.update_connect_popup_models();
+        tui
     }
 
     /// Create new SimpleTui with provider-backed EventLoop integration.
@@ -244,16 +315,104 @@ impl SimpleTui {
         self
     }
 
+    fn resolve_api_key_with_config(&self, provider_name: &str, explicit: Option<String>) -> String {
+        if let Some(key) = explicit.filter(|k| !k.is_empty()) {
+            return key;
+        }
+        
+        let lower = provider_name.to_lowercase();
+        
+        // 1. Try opencode config options.apiKey
+        if let Some(config) = &self.opencode_config {
+            if let Some(prov_map) = &config.provider {
+                if let Some(prov_cfg) = prov_map.get(&lower) {
+                    if let Some(options) = &prov_cfg.options {
+                        if let Some(api_key) = &options.api_key {
+                            if !api_key.is_empty() {
+                                return api_key.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback to standard environment variables
+        resolve_api_key(&lower, None)
+    }
+
+    fn create_tui_provider(&self, provider_name: &str, model: &str, api_key: &str) -> anyhow::Result<Arc<dyn ModelProvider>> {
+        let lower = provider_name.to_lowercase();
+        
+        // 1. Check if the provider is defined in opencode.json config
+        if let Some(cfg_prov) = self.opencode_config.as_ref()
+            .and_then(|c| c.provider.as_ref())
+            .and_then(|p| p.get(&lower)) 
+        {
+            let options_key = cfg_prov.options.as_ref().and_then(|o| o.api_key.clone());
+            let options_url = cfg_prov.options.as_ref().and_then(|o| o.base_url.clone());
+            
+            let resolved_key = if api_key.is_empty() {
+                options_key.unwrap_or_default()
+            } else {
+                api_key.to_string()
+            };
+
+            // Try to get base URL: either from config options, or fallback from a known static provider matching the name
+            let resolved_url = options_url.or_else(|| {
+                let static_name = if lower.contains("zai") {
+                    "zai"
+                } else if lower.contains("openai") {
+                    "openai"
+                } else if lower.contains("openrouter") {
+                    "openrouter"
+                } else {
+                    &lower
+                };
+                provider::find_provider(static_name).map(|entry| entry.base_url.to_string())
+            });
+
+            if let Some(base_url) = resolved_url {
+                let provider = provider::OpenAIProvider::with_base_url(model, resolved_key, base_url);
+                return Ok(Arc::new(provider));
+            }
+        }
+
+        // 2. Fallback to standard provider creation
+        provider::create_provider(&lower, model, api_key)
+    }
+
     fn update_connect_popup_models(&mut self) {
         let provider = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
-        let mut models: Vec<String> = provider::MODEL_CATALOG.iter()
-            .filter(|m| m.provider == provider)
-            .map(|m| m.model.to_string())
-            .collect();
+        let mut models = Vec::new();
+
+        // 1. Try to get models from opencode.json config
+        if let Some(config) = &self.opencode_config {
+            if let Some(prov_map) = &config.provider {
+                if let Some(prov_cfg) = prov_map.get(provider) {
+                    if let Some(models_map) = &prov_cfg.models {
+                        for m in models_map.keys() {
+                            models.push(m.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Fall back to static MODEL_CATALOG
+        if models.is_empty() {
+            models = provider::MODEL_CATALOG.iter()
+                .filter(|m| m.provider == provider)
+                .map(|m| m.model.to_string())
+                .collect();
+        }
             
         if models.is_empty() {
             models.push("default".to_string());
         }
+
+        models.sort();
+        models.dedup();
         
         self.connect_popup.models = models;
         self.connect_popup.selected_model_idx = 0;
@@ -346,7 +505,7 @@ impl SimpleTui {
                                 self.connect_popup.selected_provider_idx -= 1;
                                 self.update_connect_popup_models();
                                 let p = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
-                                self.connect_popup.api_key = resolve_api_key(p, None);
+                                self.connect_popup.api_key = self.resolve_api_key_with_config(p, None);
                             }
                         }
                         ConnectPopupField::Model => {
@@ -364,7 +523,7 @@ impl SimpleTui {
                                 self.connect_popup.selected_provider_idx += 1;
                                 self.update_connect_popup_models();
                                 let p = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
-                                self.connect_popup.api_key = resolve_api_key(p, None);
+                                self.connect_popup.api_key = self.resolve_api_key_with_config(p, None);
                             }
                         }
                         ConnectPopupField::Model => {
@@ -395,7 +554,7 @@ impl SimpleTui {
                     self.connect_popup.active = false;
                     
                     let key_resolved = if key.is_empty() {
-                        resolve_api_key(&provider, None)
+                        self.resolve_api_key_with_config(&provider, None)
                     } else {
                         key
                     };
@@ -405,7 +564,7 @@ impl SimpleTui {
                             "Error: No API key resolved for provider '{}'.", provider
                         )));
                     } else {
-                        match provider::create_provider(&provider, &model, &key_resolved) {
+                        match self.create_tui_provider(&provider, &model, &key_resolved) {
                             Ok(new_provider) => {
                                 self.provider = new_provider;
                                 self.add_entry(ConversationEntry::System(format!(
@@ -692,14 +851,14 @@ impl SimpleTui {
                     }
                     SlashCommand::Model { model } => {
                         if let Some(info) = provider::MODEL_CATALOG.iter().find(|m| m.model == model) {
-                            let key = resolve_api_key(info.provider, None);
+                            let key = self.resolve_api_key_with_config(info.provider, None);
                             if key.is_empty() && info.provider != "mock" && info.provider != "local" {
                                 self.add_entry(ConversationEntry::System(format!(
                                     "Error: API key not found for provider '{}'. Please set the environment variable.",
                                     info.provider
                                 )));
                             } else {
-                                match provider::create_provider(info.provider, info.model, &key) {
+                                match self.create_tui_provider(info.provider, info.model, &key) {
                                     Ok(new_provider) => {
                                         self.provider = new_provider;
                                         self.add_entry(ConversationEntry::System(format!(
@@ -722,8 +881,8 @@ impl SimpleTui {
                                 .map(|m| m.provider)
                                 .unwrap_or("openai");
                                 
-                            let key = resolve_api_key(current_provider, None);
-                            match provider::create_provider(current_provider, &model, &key) {
+                            let key = self.resolve_api_key_with_config(current_provider, None);
+                            match self.create_tui_provider(current_provider, &model, &key) {
                                 Ok(new_provider) => {
                                     self.provider = new_provider;
                                     self.add_entry(ConversationEntry::System(format!(
@@ -731,11 +890,22 @@ impl SimpleTui {
                                         model, current_provider
                                     )));
                                 }
-                                Err(e) => {
-                                    self.add_entry(ConversationEntry::System(format!(
-                                        "Error changing model: {}",
-                                        e
-                                    )));
+                                Err(_) => {
+                                    match provider::create_provider(current_provider, &model, &key) {
+                                        Ok(new_provider) => {
+                                            self.provider = new_provider;
+                                            self.add_entry(ConversationEntry::System(format!(
+                                                "Model switched to custom model {} on provider {}",
+                                                model, current_provider
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            self.add_entry(ConversationEntry::System(format!(
+                                                "Error changing model: {}",
+                                                e
+                                            )));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -748,37 +918,58 @@ impl SimpleTui {
                             self.connect_popup.selected_model_idx = 0;
                             self.update_connect_popup_models();
                             let default_provider = &self.connect_popup.providers[0];
-                            self.connect_popup.api_key = resolve_api_key(default_provider, None);
+                            self.connect_popup.api_key = self.resolve_api_key_with_config(default_provider, None);
                             self.add_entry(ConversationEntry::System(
                                 "Opened interactive Connect Selector. Press [Tab] to switch fields, [Up/Down] to select, [Enter] to connect, [Esc] to close.".to_string()
                             ));
                         } else {
-                            let provider_lower = provider.to_lowercase();
-                            let resolved_model = model.clone().unwrap_or_else(|| {
-                                provider::default_model(&provider_lower)
-                                    .map(|m| m.model.to_string())
-                                    .unwrap_or_else(|| "default".to_string())
+                            let (prov_name, model_opt) = if let Some(pos) = provider.find('/') {
+                                let p = provider[..pos].to_string();
+                                let m = provider[pos + 1..].to_string();
+                                (p, Some(m))
+                            } else {
+                                (provider.clone(), model.clone())
+                            };
+
+                            let provider_lower = prov_name.to_lowercase();
+                            let resolved_model = model_opt.unwrap_or_else(|| {
+                                let mut default_m = None;
+                                if let Some(config) = &self.opencode_config {
+                                    if let Some(prov_map) = &config.provider {
+                                        if let Some(prov_cfg) = prov_map.get(&provider_lower) {
+                                            if let Some(models_map) = &prov_cfg.models {
+                                                default_m = models_map.keys().next().cloned();
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                default_m.unwrap_or_else(|| {
+                                    provider::default_model(&provider_lower)
+                                        .map(|m| m.model.to_string())
+                                        .unwrap_or_else(|| "default".to_string())
+                                })
                             });
                             
-                            let key = resolve_api_key(&provider_lower, api_key);
+                            let key = self.resolve_api_key_with_config(&provider_lower, api_key);
                             if key.is_empty() && provider_lower != "mock" && provider_lower != "local" {
                                 self.add_entry(ConversationEntry::System(format!(
                                     "Error: No API key resolved for provider '{}'. Please pass it or set the environment variable.",
-                                    provider
+                                    prov_name
                                 )));
                             } else {
-                                match provider::create_provider(&provider_lower, &resolved_model, &key) {
+                                match self.create_tui_provider(&provider_lower, &resolved_model, &key) {
                                     Ok(new_provider) => {
                                         self.provider = new_provider;
                                         self.add_entry(ConversationEntry::System(format!(
                                             "Successfully connected to provider '{}' using model '{}'!",
-                                            provider, resolved_model
+                                            prov_name, resolved_model
                                         )));
                                     }
                                     Err(e) => {
                                         self.add_entry(ConversationEntry::System(format!(
                                             "Failed to connect to provider '{}': {}",
-                                            provider, e
+                                            prov_name, e
                                         )));
                                     }
                                 }
@@ -2444,6 +2635,9 @@ mod tests {
             .await;
         assert_eq!(tui.connect_popup.active_field, ConnectPopupField::ApiKey);
         
+        // Clear any configuration-loaded default API key for deterministic test execution
+        tui.connect_popup.api_key.clear();
+        
         // Type some keys for API key
         tui.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()))
             .await;
@@ -2513,5 +2707,47 @@ mod tests {
             6
         };
         assert_eq!(diff_height_focused, 12);
+    }
+
+    #[tokio::test]
+    async fn test_opencode_dynamic_connect() {
+        let mut tui = test_tui();
+        
+        // Mock opencode config
+        let mut prov_map = HashMap::new();
+        prov_map.insert(
+            "custom-prov".to_string(),
+            OpenCodeProvider {
+                options: Some(OpenCodeProviderOptions {
+                    api_key: Some("custom_key".to_string()),
+                    base_url: Some("http://localhost:1234/v1".to_string()),
+                }),
+                models: Some({
+                    let mut m = HashMap::new();
+                    m.insert("custom-model".to_string(), serde_json::json!({}));
+                    m
+                }),
+            },
+        );
+        tui.opencode_config = Some(OpenCodeConfig {
+            provider: Some(prov_map),
+            model: Some("custom-prov/custom-model".to_string()),
+            small_model: None,
+        });
+
+        // 1. Test key resolution
+        let resolved_key = tui.resolve_api_key_with_config("custom-prov", None);
+        assert_eq!(resolved_key, "custom_key");
+
+        // 2. Test create provider
+        let provider = tui.create_tui_provider("custom-prov", "custom-model", "").unwrap();
+        assert_eq!(provider.model(), "custom-model");
+
+        // 3. Test slash command /connect with provider/model format
+        tui.input = "/connect custom-prov/custom-model".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())).await;
+        
+        assert_eq!(tui.provider.model(), "custom-model");
     }
 }
