@@ -163,16 +163,12 @@ impl ModelProvider for OpenAIProvider {
 
 #[async_trait]
 impl StreamingProvider for OpenAIProvider {
-    async fn chat_stream(
-        &self,
-        messages: &[Message],
-    ) -> Result<mpsc::Receiver<StreamEvent>> {
+    async fn chat_stream(&self, messages: &[Message]) -> Result<mpsc::Receiver<StreamEvent>> {
         let openai_messages = Self::convert_messages(messages);
         let url = self
             .base_url
             .as_deref()
-            .unwrap_or("https://api.openai.com/v1/chat/completions")
-            .replace("chat/completions", "chat/completions");
+            .unwrap_or("https://api.openai.com/v1/chat/completions");
 
         let response = self
             .client
@@ -216,22 +212,41 @@ impl StreamingProvider for OpenAIProvider {
 
                             if let Some(data) = line.strip_prefix("data: ") {
                                 if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
+                                    if let Some(choices) =
+                                        chunk.get("choices").and_then(|c| c.as_array())
+                                    {
                                         if let Some(choice) = choices.first() {
                                             if let Some(delta) = choice.get("delta") {
-                                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                                                    let _ = tx.send(StreamEvent::Delta { content: content.to_string() }).await;
+                                                if let Some(content) =
+                                                    delta.get("content").and_then(|c| c.as_str())
+                                                {
+                                                    let _ = tx
+                                                        .send(StreamEvent::Delta {
+                                                            content: content.to_string(),
+                                                        })
+                                                        .await;
                                                 }
-                                                if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                                                if let Some(tool_calls) = delta
+                                                    .get("tool_calls")
+                                                    .and_then(|tc| tc.as_array())
+                                                {
                                                     for tc in tool_calls {
-                                                        if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                                                        if let Some(id) =
+                                                            tc.get("id").and_then(|i| i.as_str())
+                                                        {
                                                             if let Some(func) = tc.get("function") {
-                                                                let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                                                let name = func
+                                                                    .get("name")
+                                                                    .and_then(|n| n.as_str())
+                                                                    .unwrap_or("");
                                                                 let _ = tx.send(StreamEvent::ToolCallStart { id: id.to_string(), name: name.to_string() }).await;
                                                             }
                                                         }
                                                         if let Some(func) = tc.get("function") {
-                                                            if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                                            if let Some(args) = func
+                                                                .get("arguments")
+                                                                .and_then(|a| a.as_str())
+                                                            {
                                                                 let _ = tx.send(StreamEvent::ToolCallArgument { id: tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(), argument: args.to_string() }).await;
                                                             }
                                                         }
@@ -245,7 +260,11 @@ impl StreamingProvider for OpenAIProvider {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: e.to_string(),
+                            })
+                            .await;
                         break;
                     }
                 }

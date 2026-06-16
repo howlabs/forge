@@ -42,7 +42,9 @@ use crate::symbols::{parse_symbols, Symbol, SymbolKind};
 /// `SymbolId(0)` is reserved and never returned by any API.  Real
 /// symbols are assigned ids starting at 1 in the order they are
 /// inserted by [`KnowledgeGraph::add_file`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct SymbolId(pub u32);
 
 /// Kind of relationship between two symbols.
@@ -97,11 +99,13 @@ pub struct KnowledgeGraph {
 }
 
 mod adj_serde {
-    use super::{SymbolId, EdgeKind};
-    use std::collections::{HashMap, BTreeSet};
-    use serde::{Serialize, Serializer, Deserialize, Deserializer};
+    use super::{EdgeKind, SymbolId};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::{BTreeSet, HashMap};
 
-    pub fn serialize<S>(adj: &HashMap<(SymbolId, EdgeKind), BTreeSet<SymbolId>>, serializer: S) -> Result<S::Ok, S::Error>
+    type AdjMap = HashMap<(SymbolId, EdgeKind), BTreeSet<SymbolId>>;
+
+    pub fn serialize<S>(adj: &AdjMap, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -109,7 +113,7 @@ mod adj_serde {
         vec.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<(SymbolId, EdgeKind), BTreeSet<SymbolId>>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<AdjMap, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -126,17 +130,16 @@ impl KnowledgeGraph {
 
     /// Load the graph from disk.
     pub fn load(path: &Path) -> Result<Self> {
-        let data = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let graph: Self = serde_json::from_str(&data)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let data =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let graph: Self =
+            serde_json::from_str(&data).with_context(|| format!("parsing {}", path.display()))?;
         Ok(graph)
     }
 
     /// Save the graph to disk atomically.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let data = serde_json::to_string(self)
-            .with_context(|| format!("serializing graph"))?;
+        let data = serde_json::to_string(self).with_context(|| "serializing graph".to_string())?;
         let temp_path = path.with_extension("tmp");
         std::fs::write(&temp_path, data)
             .with_context(|| format!("writing temp file {}", temp_path.display()))?;
@@ -305,9 +308,7 @@ impl KnowledgeGraph {
                     let span = parent_sym.end_line - parent_sym.start_line;
                     match best {
                         None => best = Some((*from, span)),
-                        Some((_, best_span)) if span < best_span => {
-                            best = Some((*from, span))
-                        }
+                        Some((_, best_span)) if span < best_span => best = Some((*from, span)),
                         _ => {}
                     }
                 }
@@ -428,8 +429,7 @@ impl KnowledgeGraph {
             Lang::Python => {
                 for line in source.lines() {
                     let line = line.trim();
-                    if line.starts_with("import ") {
-                        let module = &line[7..];
+                    if let Some(module) = line.strip_prefix("import ") {
                         if let Some(name) = module.split('.').next() {
                             let name = name.split_whitespace().next().unwrap_or(name);
                             imports.insert(name.to_string(), module.to_string());
@@ -439,12 +439,7 @@ impl KnowledgeGraph {
                             let module = rest[..pos].trim();
                             let names_part = &rest[pos + 8..];
                             for name in names_part.split(',') {
-                                let name = name
-                                    .trim()
-                                    .split(" as ")
-                                    .next()
-                                    .unwrap_or("")
-                                    .trim();
+                                let name = name.trim().split(" as ").next().unwrap_or("").trim();
                                 if !name.is_empty() && name != "*" {
                                     imports.insert(name.to_string(), module.to_string());
                                 }
@@ -467,26 +462,15 @@ impl KnowledgeGraph {
                             .trim();
                         let names_part = &line[7..from_pos];
                         if names_part.starts_with('{') {
-                            for name in
-                                names_part.trim_matches(|c| c == '{' || c == '}').split(',')
+                            for name in names_part.trim_matches(|c| c == '{' || c == '}').split(',')
                             {
-                                let name = name
-                                    .trim()
-                                    .split(" as ")
-                                    .next()
-                                    .unwrap_or("")
-                                    .trim();
+                                let name = name.trim().split(" as ").next().unwrap_or("").trim();
                                 if !name.is_empty() {
                                     imports.insert(name.to_string(), module.to_string());
                                 }
                             }
                         } else if !names_part.is_empty() {
-                            let name = names_part
-                                .trim()
-                                .split(" as ")
-                                .next()
-                                .unwrap_or("")
-                                .trim();
+                            let name = names_part.trim().split(" as ").next().unwrap_or("").trim();
                             if !name.is_empty() {
                                 imports.insert(name.to_string(), module.to_string());
                             }
@@ -502,10 +486,8 @@ impl KnowledgeGraph {
                     }
                     let rest = &line[7..];
                     if rest.starts_with('"') {
-                        let module =
-                            rest.trim_matches(|c| c == '"' || c == '\'');
-                        let name =
-                            module.rsplit('/').next().unwrap_or(module);
+                        let module = rest.trim_matches(|c| c == '"' || c == '\'');
+                        let name = module.rsplit('/').next().unwrap_or(module);
                         imports.insert(name.to_string(), module.to_string());
                     } else if let Some(space_pos) = rest.find(' ') {
                         let alias = &rest[..space_pos];
@@ -733,7 +715,7 @@ impl KnowledgeGraph {
                     let same_file_targets: Vec<SymbolId> = targets
                         .iter()
                         .copied()
-                        .filter(|&t| self.symbol(t).map_or(false, |s| s.file == owner_file))
+                        .filter(|&t| self.symbol(t).is_some_and(|s| s.file == owner_file))
                         .collect();
                     if !same_file_targets.is_empty() {
                         targets = same_file_targets;
@@ -823,9 +805,13 @@ impl KnowledgeGraph {
             }
             Lang::Go | Lang::Java | Lang::Cpp => {
                 if kind == "call_expression" || kind == "method_invocation" {
-                    if let Some(func) = node.child_by_field_name("function").or_else(|| node.child_by_field_name("name")) {
+                    if let Some(func) = node
+                        .child_by_field_name("function")
+                        .or_else(|| node.child_by_field_name("name"))
+                    {
                         // ponytail: handle selector/field exprs the same way JS handles member_expression
-                        if func.kind() == "selector_expression" || func.kind() == "field_expression" {
+                        if func.kind() == "selector_expression" || func.kind() == "field_expression"
+                        {
                             if let Some(field) = func.child_by_field_name("field") {
                                 Self::push_identifier_from(field, source, line, out, true);
                             }
@@ -894,7 +880,11 @@ impl KnowledgeGraph {
         }
     }
 
-    fn extract_identifiers_from_pattern(node: Node, source: &str, out: &mut std::collections::HashSet<String>) {
+    fn extract_identifiers_from_pattern(
+        node: Node,
+        source: &str,
+        out: &mut std::collections::HashSet<String>,
+    ) {
         if node.kind() == "identifier" {
             let text = crate::symbols::node_text(node, source).to_string();
             out.insert(text);
@@ -1109,24 +1099,25 @@ mod tests {
         let mut g = KnowledgeGraph::new();
         g.add_file(&PathBuf::from("a.rs"), src, &registry())
             .unwrap();
-        
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("graph.json");
-        
+
         g.save(&path).unwrap();
         let loaded = KnowledgeGraph::load(&path).unwrap();
-        
+
         assert_eq!(g.symbol_count(), loaded.symbol_count());
         let caller = *g.find_by_name("caller").first().unwrap();
         let target = *g.find_by_name("target").first().unwrap();
-        
+
         let calls = loaded.neighbors(caller, EdgeKind::Calls);
         assert!(calls.contains(&target));
     }
 
     #[test]
     fn local_variables_are_not_linked_as_globals() {
-        let src = "fn global_func() {}\nfn caller() {\n    let global_func = 1;\n    global_func;\n}\n";
+        let src =
+            "fn global_func() {}\nfn caller() {\n    let global_func = 1;\n    global_func;\n}\n";
         let mut g = KnowledgeGraph::new();
         g.add_file(&PathBuf::from("a.rs"), src, &registry())
             .unwrap();
@@ -1137,7 +1128,10 @@ mod tests {
         // The identifier `global_func` inside `caller` matches the local variable,
         // so it should NOT create a reference to the global `global_func`.
         let refs = g.neighbors(caller, EdgeKind::References);
-        assert!(!refs.contains(&global), "local variable should not link to global function");
+        assert!(
+            !refs.contains(&global),
+            "local variable should not link to global function"
+        );
     }
 
     #[test]
@@ -1194,18 +1188,17 @@ mod tests {
         assert_eq!(ids.len(), 2, "expected two new() symbols");
         let q1 = g.resolve_qualified_by_id(ids[0]).unwrap();
         let q2 = g.resolve_qualified_by_id(ids[1]).unwrap();
-        assert_ne!(q1, q2, "two new() in different modules must have distinct qnames");
+        assert_ne!(
+            q1, q2,
+            "two new() in different modules must have distinct qnames"
+        );
     }
 
     #[test]
     fn resolve_qualified_finds_symbol() {
         let mut g = KnowledgeGraph::new();
-        g.add_file(
-            &PathBuf::from("lib.rs"),
-            "fn greet() {}\n",
-            &registry(),
-        )
-        .unwrap();
+        g.add_file(&PathBuf::from("lib.rs"), "fn greet() {}\n", &registry())
+            .unwrap();
 
         let greet_id = *g.find_by_name("greet").first().unwrap();
         let qname = g.resolve_qualified_by_id(greet_id).unwrap();
@@ -1259,10 +1252,7 @@ mod tests {
 
         let run_id = *g.find_by_name("run").first().unwrap();
         let calls = g.neighbors(run_id, EdgeKind::Calls);
-        assert!(
-            !calls.is_empty(),
-            "run should call add via from-import"
-        );
+        assert!(!calls.is_empty(), "run should call add via from-import");
     }
 
     #[test]
@@ -1307,10 +1297,7 @@ mod tests {
 
         let main_id = *g.find_by_name("main").first().unwrap();
         let calls = g.neighbors(main_id, EdgeKind::Calls);
-        assert!(
-            !calls.is_empty(),
-            "main should call Debug via Go import"
-        );
+        assert!(!calls.is_empty(), "main should call Debug via Go import");
     }
 
     // ---- query API (§4) -------------------------------------------------
@@ -1407,12 +1394,8 @@ mod tests {
     #[test]
     fn remove_file_cleans_qualified_names() {
         let mut g = KnowledgeGraph::new();
-        g.add_file(
-            &PathBuf::from("a.rs"),
-            "fn alpha() {}\n",
-            &registry(),
-        )
-        .unwrap();
+        g.add_file(&PathBuf::from("a.rs"), "fn alpha() {}\n", &registry())
+            .unwrap();
         let alpha_id = *g.find_by_name("alpha").first().unwrap();
         let qname = g.resolve_qualified_by_id(alpha_id).unwrap();
         assert!(g.resolve_qualified(&qname).is_some());

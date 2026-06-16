@@ -1,6 +1,6 @@
 use anyhow::Result;
 use context::{ContextEngine, ContextIndex};
-use forge_ext::mcp::{McpClient, McpServer, McpTool, shared_server, SharedMcpServer};
+use forge_ext::mcp::{shared_server, McpClient, McpServer, McpTool, SharedMcpServer};
 use provider::{Message, ModelProvider, ToolCall};
 use sandbox::Sandbox;
 use std::path::{Path, PathBuf};
@@ -414,11 +414,7 @@ impl<P: ModelProvider> EventLoop<P> {
         }
     }
 
-    pub async fn with_mcp_client(
-        &mut self,
-        command: String,
-        args: Vec<String>,
-    ) -> Result<()> {
+    pub async fn with_mcp_client(&mut self, command: String, args: Vec<String>) -> Result<()> {
         let mut client = McpClient::new_stdio(command, args).await?;
         client.initialize().await?;
         let tools = client.list_tools().await?;
@@ -631,7 +627,7 @@ impl<P: ModelProvider> EventLoop<P> {
         sections.join("")
     }
 
-// Removed unused default_system_prompt; get_system_prompt now always loads AGENTS.md.
+    // Removed unused default_system_prompt; get_system_prompt now always loads AGENTS.md.
 
     async fn execute_tool_with_result(&mut self, tool_call: ToolCall) -> Result<String> {
         debug!("Executing tool: {}", tool_call.name);
@@ -644,7 +640,7 @@ impl<P: ModelProvider> EventLoop<P> {
                 let output = self.sandbox.run_command(&command).await?;
                 debug!("Command output: {}", output);
                 Ok(format!("Command output:\n{}", output))
-            },
+            }
             "diff_edit" => self.tool_diff_edit(tool_call).await,
             _ => {
                 if let Some(client) = &self.mcp_client {
@@ -679,8 +675,6 @@ impl<P: ModelProvider> EventLoop<P> {
             path
         ))
     }
-
-
 
     async fn tool_diff_edit(&mut self, tool_call: ToolCall) -> Result<String> {
         let path: String = tool_call.get_arg("path")?;
@@ -772,23 +766,6 @@ impl<P: ModelProvider> EventLoop<P> {
         }
         symbols
     }
-
-    fn should_index(root: &Path, path: &Path) -> bool {
-        // Skip ignored dirs and hidden files, then rely on language detection
-        if let Ok(rel) = path.strip_prefix(root) {
-            for comp in rel.components() {
-                if let std::path::Component::Normal(name) = comp {
-                    if let Some(s) = name.to_str() {
-                        if s.starts_with('.') || [".git", "target", "node_modules", "dist", "build"].contains(&s) {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-        // Index only if the file has a known language extension
-        context::lang::Lang::for_path(path).is_some()
-    }
 }
 
 #[cfg(test)]
@@ -799,7 +776,9 @@ mod tests {
 
     struct MockContextIndex;
     impl MockContextIndex {
-        fn new() -> Self { Self }
+        fn new() -> Self {
+            Self
+        }
     }
     impl context::ContextIndex for MockContextIndex {
         fn upsert_file(&mut self, _path: &std::path::Path, _src: &str) {}
@@ -1065,16 +1044,14 @@ mod tests {
         let context = ContextEngine::new("/tmp/test").unwrap();
         let sandbox = Sandbox::new("/tmp/test", "off").unwrap();
 
-        let event_loop = EventLoop::new(provider, context, sandbox, "test task".to_string())
-            .with_mcp_server();
+        let event_loop =
+            EventLoop::new(provider, context, sandbox, "test task".to_string()).with_mcp_server();
 
         assert!(event_loop.mcp_server().is_some());
         let server = event_loop.mcp_server().unwrap();
         let server_ref = server.blocking_read();
         assert_eq!(server_ref.tool_count(), 4);
     }
-
-
 
     #[tokio::test]
     async fn test_verify_symbols_before_edit_pass() {

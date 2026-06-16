@@ -18,8 +18,7 @@ use tracing::{debug, info, warn};
 /// Save a task to disk atomically (temp + rename).
 fn save_task_to_disk(state_dir: &Path, task: &Task) -> Result<()> {
     let path = state_dir.join(format!("{}.json", task.id));
-    let json =
-        serde_json::to_string_pretty(task).context("failed to serialize task")?;
+    let json = serde_json::to_string_pretty(task).context("failed to serialize task")?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &json).context("failed to write task state")?;
     std::fs::rename(&tmp, &path).context("failed to rename task state")?;
@@ -64,8 +63,7 @@ impl MultiAgentOrchestrator {
             .context("Failed to create worktree base directory")?;
 
         let state_dir = repo_path.join(".forge").join("agents");
-        std::fs::create_dir_all(&state_dir)
-            .context("Failed to create agents state directory")?;
+        std::fs::create_dir_all(&state_dir).context("Failed to create agents state directory")?;
 
         Ok(Self {
             repo_path,
@@ -162,7 +160,9 @@ impl MultiAgentOrchestrator {
             ));
         }
 
-        let base = String::from_utf8_lossy(&base_output.stdout).trim().to_string();
+        let base = String::from_utf8_lossy(&base_output.stdout)
+            .trim()
+            .to_string();
 
         // Use git merge-tree to detect conflicts
         let merge_output = Command::new("git")
@@ -230,9 +230,7 @@ impl MultiAgentOrchestrator {
             // need a crate.
             let in_scope = globs.iter().any(|glob| {
                 let glob = glob.trim_start_matches("**/");
-                file.starts_with(glob.trim_end_matches("/**"))
-                    || glob == "**"
-                    || glob == "*"
+                file.starts_with(glob.trim_end_matches("/**")) || glob == "**" || glob == "*"
             });
             if !in_scope {
                 violations.push(file.to_string());
@@ -536,8 +534,7 @@ mod tests {
     async fn test_state_persistence_roundtrip() {
         let repo = init_git_repo();
         let worktrees = TempDir::new().unwrap();
-        let orchestrator =
-            MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
+        let orchestrator = MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
 
         let mut task = Task::new("persist me", PathBuf::new())
             .with_provider("key", "model")
@@ -559,8 +556,7 @@ mod tests {
     async fn test_list_tasks_from_disk() {
         let repo = init_git_repo();
         let worktrees = TempDir::new().unwrap();
-        let orchestrator =
-            MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
+        let orchestrator = MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
 
         let t1 = Task::new("task1", PathBuf::new());
         let t2 = Task::new("task2", PathBuf::new());
@@ -575,8 +571,7 @@ mod tests {
     fn test_no_conflicts_on_clean_merge_base() {
         let repo = init_git_repo();
         let worktrees = TempDir::new().unwrap();
-        let orchestrator =
-            MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
+        let orchestrator = MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
 
         // No branch "nonexistent" → merge-base fails
         let result = orchestrator.detect_merge_conflicts("nonexistent");
@@ -587,8 +582,7 @@ mod tests {
     fn test_scope_violations_empty_for_no_scope() {
         let repo = init_git_repo();
         let worktrees = TempDir::new().unwrap();
-        let orchestrator =
-            MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
+        let orchestrator = MultiAgentOrchestrator::new(repo.path(), worktrees.path(), 2).unwrap();
 
         let task = Task::new("test", PathBuf::new());
         assert!(orchestrator.check_scope_violations(&task).is_empty());

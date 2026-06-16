@@ -14,7 +14,11 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     pub fn new(stdin: tokio::process::ChildStdin, stdout: tokio::process::ChildStdout) -> Self {
-        Self { stdin, stdout: BufReader::new(stdout), connected: true }
+        Self {
+            stdin,
+            stdout: BufReader::new(stdout),
+            connected: true,
+        }
     }
 
     pub async fn send(&mut self, message: &str) -> Result<()> {
@@ -76,7 +80,8 @@ impl SseTransport {
 
     pub async fn send_message(&self, message: &str) -> Result<()> {
         let url = format!("{}/message", self.endpoint);
-        self.client.post(&url)
+        self.client
+            .post(&url)
             .header("Content-Type", "application/json")
             .body(message.to_string())
             .send()
@@ -97,11 +102,16 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     pub fn new(endpoint: String) -> Self {
-        Self { endpoint, client: reqwest::Client::new() }
+        Self {
+            endpoint,
+            client: reqwest::Client::new(),
+        }
     }
 
     pub async fn send_request(&self, message: &str) -> Result<String> {
-        let resp = self.client.post(&self.endpoint)
+        let resp = self
+            .client
+            .post(&self.endpoint)
             .header("Content-Type", "application/json")
             .body(message.to_string())
             .send()

@@ -24,8 +24,14 @@ impl ServerProcess {
             .stdout(std::process::Stdio::piped())
             .spawn()?;
 
-        let stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("No stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("No stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("No stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("No stdout"))?;
 
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
@@ -132,7 +138,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_process_is_running() {
-        let proc = ServerProcess::spawn("echo".into(), vec!["test".into()]).await.unwrap();
+        let proc = ServerProcess::spawn("echo".into(), vec!["test".into()])
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!proc.is_running().await);
     }

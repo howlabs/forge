@@ -120,7 +120,7 @@ impl VectorStore {
                 fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             let store: StoreData = serde_json::from_str(&data)
                 .with_context(|| format!("parsing {}", path.display()))?;
-            
+
             // Invalidate store if dimension or model changed
             if store.dim != dim || store.model != model {
                 tracing::info!(
@@ -132,7 +132,7 @@ impl VectorStore {
                 let mut chunks = HashMap::with_capacity(store.entries.len());
                 let mut embeddings = HashMap::with_capacity(store.entries.len());
                 let mut file_index: HashMap<PathBuf, Vec<u64>> = HashMap::new();
-                
+
                 for entry in store.entries {
                     let id = entry.chunk.id;
                     let path = entry.chunk.file.clone();
@@ -176,7 +176,7 @@ impl VectorStore {
         let normalized = l2_normalize(&embedding);
         let id = chunk.id;
         let path = chunk.file.clone();
-        
+
         self.file_index.entry(path).or_default().push(id);
         self.chunks.insert(id, chunk);
         self.embeddings.insert(id, normalized);
@@ -270,7 +270,8 @@ impl VectorStore {
         let path = self.dir.join("vector_store.json");
         let tmp_path = self.dir.join("vector_store.json.tmp");
         fs::write(&tmp_path, &json).with_context(|| format!("writing {}", tmp_path.display()))?;
-        fs::rename(&tmp_path, &path).with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
+        fs::rename(&tmp_path, &path)
+            .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
         Ok(())
     }
 
@@ -380,7 +381,9 @@ impl Embedder for ApiEmbedder {
         // Some APIs expect /v1/embeddings.
         let url = format!("{}/embeddings", self.base_url.trim_end_matches('/'));
 
-        let future = self.client.post(&url)
+        let future = self
+            .client
+            .post(&url)
             .bearer_auth(&self.api_key)
             .json(&req)
             .send();
@@ -434,7 +437,10 @@ mod tests {
 
     impl MockEmbedder {
         fn new(dim: usize, model: &str) -> Self {
-            Self { dim, model: model.to_string() }
+            Self {
+                dim,
+                model: model.to_string(),
+            }
         }
 
         fn vector_for(text: &str, dim: usize) -> Vec<f32> {
@@ -603,7 +609,10 @@ mod tests {
         }
         // Re-open with wrong dim.
         let store = VectorStore::open(dir.path(), 8, "mock").unwrap();
-        assert!(store.chunks.is_empty(), "expected store to be invalidated and empty");
+        assert!(
+            store.chunks.is_empty(),
+            "expected store to be invalidated and empty"
+        );
     }
 
     #[test]

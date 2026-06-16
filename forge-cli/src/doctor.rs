@@ -140,7 +140,12 @@ fn render_text(checks: &[Check]) {
     let mut failures = 0;
     let mut warnings = 0;
     for check in checks {
-        println!("{} {:<24} {}", check.status.glyph(), check.name, check.detail);
+        println!(
+            "{} {:<24} {}",
+            check.status.glyph(),
+            check.name,
+            check.detail
+        );
         match check.status {
             Status::Fail => failures += 1,
             Status::Warn => warnings += 1,
@@ -401,7 +406,9 @@ fn check_network_sandbox(network: &str) -> Check {
         Check::new(
             "network sandbox",
             Status::Warn,
-            format!("mode='{network}'; OS-level net isolation is Linux-only, command policy enforced"),
+            format!(
+                "mode='{network}'; OS-level net isolation is Linux-only, command policy enforced"
+            ),
         )
     }
 }
@@ -418,14 +425,22 @@ fn check_config(config_path: &str) -> Check {
     }
     match std::fs::read_to_string(path) {
         Ok(content) => match toml::from_str::<toml::Table>(&content) {
-            Ok(_) => Check::new("config", Status::Ok, format!("{config_path} parsed cleanly")),
+            Ok(_) => Check::new(
+                "config",
+                Status::Ok,
+                format!("{config_path} parsed cleanly"),
+            ),
             Err(e) => Check::new(
                 "config",
                 Status::Fail,
                 format!("{config_path} is invalid TOML: {e}"),
             ),
         },
-        Err(e) => Check::new("config", Status::Fail, format!("cannot read {config_path}: {e}")),
+        Err(e) => Check::new(
+            "config",
+            Status::Fail,
+            format!("cannot read {config_path}: {e}"),
+        ),
     }
 }
 
@@ -446,9 +461,14 @@ fn check_sandbox_config(config: Option<&DoctorToml>, requested_network: &str) ->
 
     if let Some(net) = cfg.network.as_deref() {
         let net_lower = net.to_lowercase();
-        if !matches!(net_lower.as_str(), "off" | "on" | "restricted" | "full" | "auto") {
+        if !matches!(
+            net_lower.as_str(),
+            "off" | "on" | "restricted" | "full" | "auto"
+        ) {
             status = Status::Fail;
-            notes.push(format!("[sandbox].network='{net}' is not a recognized mode"));
+            notes.push(format!(
+                "[sandbox].network='{net}' is not a recognized mode"
+            ));
         } else if !same_network(&net_lower, &requested_network.to_lowercase()) {
             status = Status::Warn;
             notes.push(format!(
@@ -542,7 +562,10 @@ fn check_verify_config(config: Option<&DoctorToml>) -> Check {
         Check::new(
             "verify config",
             Status::Warn,
-            format!("verify commands reference missing binary(ies): {}", missing.join(", ")),
+            format!(
+                "verify commands reference missing binary(ies): {}",
+                missing.join(", ")
+            ),
         )
     }
 }
@@ -570,7 +593,9 @@ fn check_mcp_config(config: Option<&DoctorToml>) -> Check {
     let mut broken: Vec<String> = servers
         .iter()
         .filter(|(_, v)| {
-            v.get("command").and_then(|c| c.as_str()).map_or(true, |s| s.is_empty())
+            v.get("command")
+                .and_then(|c| c.as_str())
+                .map_or(true, |s| s.is_empty())
         })
         .map(|(k, _)| k.to_string())
         .collect();
@@ -601,10 +626,7 @@ fn on_path(bin: &str) -> bool {
         return Path::new(bin).exists();
     }
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|dir| dir.join(bin).exists())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).exists()))
         .unwrap_or(false)
 }
 
@@ -658,7 +680,11 @@ mod tests {
     #[test]
     fn network_mode_valid_and_invalid() {
         for ok in ["off", "on", "auto", "restricted", "full", "OFF", "Auto"] {
-            assert_eq!(check_network_mode(ok).status, Status::Ok, "expected ok for {ok}");
+            assert_eq!(
+                check_network_mode(ok).status,
+                Status::Ok,
+                "expected ok for {ok}"
+            );
         }
         assert_eq!(check_network_mode("banana").status, Status::Fail);
     }
@@ -666,10 +692,7 @@ mod tests {
     #[test]
     fn configured_provider_unknown_is_fail() {
         let toml = toml_with_provider("not-a-real-provider");
-        assert_eq!(
-            check_configured_provider(Some(&toml)).status,
-            Status::Fail
-        );
+        assert_eq!(check_configured_provider(Some(&toml)).status, Status::Fail);
     }
 
     #[test]
@@ -682,11 +705,11 @@ mod tests {
 
     #[test]
     fn configured_provider_missing_section_warns() {
-        let toml = DoctorToml { provider: None, ..Default::default() };
-        assert_eq!(
-            check_configured_provider(Some(&toml)).status,
-            Status::Warn
-        );
+        let toml = DoctorToml {
+            provider: None,
+            ..Default::default()
+        };
+        assert_eq!(check_configured_provider(Some(&toml)).status, Status::Warn);
     }
 
     #[test]
@@ -841,10 +864,7 @@ mod tests {
         let servers: toml::Table = {
             let mut t = toml::Table::new();
             let mut s = toml::Table::new();
-            let _ = s.insert(
-                "command".into(),
-                toml::Value::String("forge".to_string()),
-            );
+            let _ = s.insert("command".into(), toml::Value::String("forge".to_string()));
             let _ = t.insert("forge-self".into(), toml::Value::Table(s));
             t
         };

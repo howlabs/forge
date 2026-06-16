@@ -13,7 +13,10 @@ pub struct PluginRegistry {
 
 impl PluginRegistry {
     pub fn new(plugins_dir: PathBuf) -> Self {
-        Self { plugins_dir, installed: HashMap::new() }
+        Self {
+            plugins_dir,
+            installed: HashMap::new(),
+        }
     }
 
     pub fn plugins_dir(&self) -> &Path {
@@ -48,20 +51,25 @@ impl PluginRegistry {
     }
 
     pub fn uninstall(&mut self, name: &str) -> Result<()> {
-        self.installed.remove(name)
+        self.installed
+            .remove(name)
             .ok_or_else(|| anyhow::anyhow!("Plugin not found: {}", name))?;
         Ok(())
     }
 
     pub fn enable(&mut self, name: &str) -> Result<()> {
-        let plugin = self.installed.get_mut(name)
+        let plugin = self
+            .installed
+            .get_mut(name)
             .ok_or_else(|| anyhow::anyhow!("Plugin not found: {}", name))?;
         plugin.status = PluginStatus::Installed;
         Ok(())
     }
 
     pub fn disable(&mut self, name: &str) -> Result<()> {
-        let plugin = self.installed.get_mut(name)
+        let plugin = self
+            .installed
+            .get_mut(name)
             .ok_or_else(|| anyhow::anyhow!("Plugin not found: {}", name))?;
         plugin.status = PluginStatus::Disabled;
         Ok(())
@@ -69,38 +77,47 @@ impl PluginRegistry {
 
     pub fn search(&self, query: &str) -> Vec<&InstalledPlugin> {
         let query_lower = query.to_lowercase();
-        self.installed.values()
+        self.installed
+            .values()
             .filter(|p| {
                 p.manifest.name.to_lowercase().contains(&query_lower)
                     || p.manifest.description.to_lowercase().contains(&query_lower)
-                    || p.manifest.keywords.iter().any(|k| k.to_lowercase().contains(&query_lower))
+                    || p.manifest
+                        .keywords
+                        .iter()
+                        .any(|k| k.to_lowercase().contains(&query_lower))
             })
             .collect()
     }
 
     pub fn update_config(&mut self, name: &str, config: serde_json::Value) -> Result<()> {
-        let plugin = self.installed.get_mut(name)
+        let plugin = self
+            .installed
+            .get_mut(name)
             .ok_or_else(|| anyhow::anyhow!("Plugin not found: {}", name))?;
         plugin.config = config;
         Ok(())
     }
 
     pub fn provides_tools(&self) -> Vec<String> {
-        self.installed.values()
+        self.installed
+            .values()
             .filter(|p| matches!(p.status, PluginStatus::Installed))
             .flat_map(|p| p.manifest.provides_tools.clone())
             .collect()
     }
 
     pub fn provides_prompts(&self) -> Vec<String> {
-        self.installed.values()
+        self.installed
+            .values()
             .filter(|p| matches!(p.status, PluginStatus::Installed))
             .flat_map(|p| p.manifest.provides_prompts.clone())
             .collect()
     }
 
     pub fn provides_resources(&self) -> Vec<String> {
-        self.installed.values()
+        self.installed
+            .values()
             .filter(|p| matches!(p.status, PluginStatus::Installed))
             .flat_map(|p| p.manifest.provides_resources.clone())
             .collect()

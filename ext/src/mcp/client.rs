@@ -29,7 +29,10 @@ impl McpClient {
             server_capabilities: None,
             server_info: None,
             request_id: 0,
-            roots: vec![Root { uri: "file:///.".into(), name: Some("workspace".into()) }],
+            roots: vec![Root {
+                uri: "file:///.".into(),
+                name: Some("workspace".into()),
+            }],
         }
     }
 
@@ -48,7 +51,10 @@ impl McpClient {
             server_capabilities: None,
             server_info: None,
             request_id: 0,
-            roots: vec![Root { uri: "file:///.".into(), name: Some("workspace".into()) }],
+            roots: vec![Root {
+                uri: "file:///.".into(),
+                name: Some("workspace".into()),
+            }],
         }
     }
 
@@ -66,30 +72,41 @@ impl McpClient {
         }
     }
 
-    fn make_notification(&self, method: &str, params: Option<serde_json::Value>) -> JsonRpcNotification {
+    fn make_notification(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> JsonRpcNotification {
         JsonRpcNotification::new(method, params)
     }
 
     pub async fn initialize(&mut self) -> Result<()> {
-        let req = self.make_request(METHOD_INITIALIZE, Some(serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "roots": { "listChanged": true },
-                "sampling": {}
-            },
-            "clientInfo": {
-                "name": "forge",
-                "version": "0.100.0"
-            }
-        })));
+        let req = self.make_request(
+            METHOD_INITIALIZE,
+            Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "roots": { "listChanged": true },
+                    "sampling": {}
+                },
+                "clientInfo": {
+                    "name": "forge",
+                    "version": "0.100.0"
+                }
+            })),
+        );
 
         let resp = self.process.send_and_recv(&req).await?;
         if let Some(err) = resp.error {
             return Err(anyhow::anyhow!("Initialize failed: {}", err.message));
         }
         if let Some(result) = resp.result {
-            self.server_capabilities = Some(serde_json::from_value(result.get("capabilities").cloned().unwrap_or_default())?);
-            self.server_info = Some(serde_json::from_value(result.get("server_info").cloned().unwrap_or_default())?);
+            self.server_capabilities = Some(serde_json::from_value(
+                result.get("capabilities").cloned().unwrap_or_default(),
+            )?);
+            self.server_info = Some(serde_json::from_value(
+                result.get("server_info").cloned().unwrap_or_default(),
+            )?);
         }
 
         let notif = self.make_notification(METHOD_INITIALIZED, None);
@@ -113,14 +130,23 @@ impl McpClient {
         let req = self.make_request(METHOD_TOOLS_LIST, None);
         let resp = self.process.send_and_recv(&req).await?;
         let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
-        Ok(serde_json::from_value(result.get("tools").cloned().unwrap_or_default())?)
+        Ok(serde_json::from_value(
+            result.get("tools").cloned().unwrap_or_default(),
+        )?)
     }
 
-    pub async fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> Result<ToolCallResult> {
-        let req = self.make_request(METHOD_TOOLS_CALL, Some(serde_json::json!({
-            "name": name,
-            "arguments": arguments
-        })));
+    pub async fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<ToolCallResult> {
+        let req = self.make_request(
+            METHOD_TOOLS_CALL,
+            Some(serde_json::json!({
+                "name": name,
+                "arguments": arguments
+            })),
+        );
         let resp = self.process.send_and_recv(&req).await?;
         if let Some(err) = resp.error {
             return Err(anyhow::anyhow!("Tool call failed: {}", err.message));
@@ -134,31 +160,46 @@ impl McpClient {
         let req = self.make_request(METHOD_RESOURCES_LIST, None);
         let resp = self.process.send_and_recv(&req).await?;
         let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
-        Ok(serde_json::from_value(result.get("resources").cloned().unwrap_or_default())?)
+        Ok(serde_json::from_value(
+            result.get("resources").cloned().unwrap_or_default(),
+        )?)
     }
 
     pub async fn list_resource_templates(&mut self) -> Result<Vec<ResourceTemplate>> {
         let req = self.make_request(METHOD_RESOURCES_TEMPLATES_LIST, None);
         let resp = self.process.send_and_recv(&req).await?;
         let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
-        Ok(serde_json::from_value(result.get("resourceTemplates").cloned().unwrap_or_default())?)
+        Ok(serde_json::from_value(
+            result.get("resourceTemplates").cloned().unwrap_or_default(),
+        )?)
     }
 
     pub async fn read_resource(&mut self, uri: &str) -> Result<Vec<ResourceContents>> {
-        let req = self.make_request(METHOD_RESOURCES_READ, Some(serde_json::json!({ "uri": uri })));
+        let req = self.make_request(
+            METHOD_RESOURCES_READ,
+            Some(serde_json::json!({ "uri": uri })),
+        );
         let resp = self.process.send_and_recv(&req).await?;
         let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
-        Ok(serde_json::from_value(result.get("contents").cloned().unwrap_or_default())?)
+        Ok(serde_json::from_value(
+            result.get("contents").cloned().unwrap_or_default(),
+        )?)
     }
 
     pub async fn subscribe_resource(&mut self, uri: &str) -> Result<()> {
-        let req = self.make_request(METHOD_RESOURCES_SUBSCRIBE, Some(serde_json::json!({ "uri": uri })));
+        let req = self.make_request(
+            METHOD_RESOURCES_SUBSCRIBE,
+            Some(serde_json::json!({ "uri": uri })),
+        );
         self.process.send_and_recv(&req).await?;
         Ok(())
     }
 
     pub async fn unsubscribe_resource(&mut self, uri: &str) -> Result<()> {
-        let req = self.make_request(METHOD_RESOURCES_UNSUBSCRIBE, Some(serde_json::json!({ "uri": uri })));
+        let req = self.make_request(
+            METHOD_RESOURCES_UNSUBSCRIBE,
+            Some(serde_json::json!({ "uri": uri })),
+        );
         self.process.send_and_recv(&req).await?;
         Ok(())
     }
@@ -169,14 +210,23 @@ impl McpClient {
         let req = self.make_request(METHOD_PROMPTS_LIST, None);
         let resp = self.process.send_and_recv(&req).await?;
         let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
-        Ok(serde_json::from_value(result.get("prompts").cloned().unwrap_or_default())?)
+        Ok(serde_json::from_value(
+            result.get("prompts").cloned().unwrap_or_default(),
+        )?)
     }
 
-    pub async fn get_prompt(&mut self, name: &str, arguments: serde_json::Value) -> Result<GetPromptResult> {
-        let req = self.make_request(METHOD_PROMPTS_GET, Some(serde_json::json!({
-            "name": name,
-            "arguments": arguments
-        })));
+    pub async fn get_prompt(
+        &mut self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<GetPromptResult> {
+        let req = self.make_request(
+            METHOD_PROMPTS_GET,
+            Some(serde_json::json!({
+                "name": name,
+                "arguments": arguments
+            })),
+        );
         let resp = self.process.send_and_recv(&req).await?;
         if let Some(err) = resp.error {
             return Err(anyhow::anyhow!("Get prompt failed: {}", err.message));
@@ -187,17 +237,26 @@ impl McpClient {
     // ── Logging ──
 
     pub async fn set_log_level(&mut self, level: LogLevel) -> Result<()> {
-        let req = self.make_request(METHOD_LOGGING_SET_LEVEL, Some(serde_json::json!({
-            "level": level
-        })));
+        let req = self.make_request(
+            METHOD_LOGGING_SET_LEVEL,
+            Some(serde_json::json!({
+                "level": level
+            })),
+        );
         self.process.send_and_recv(&req).await?;
         Ok(())
     }
 
     // ── Sampling ──
 
-    pub async fn create_message(&mut self, params: CreateMessageParams) -> Result<CreateMessageResult> {
-        let req = self.make_request(METHOD_SAMPLING_CREATE_MESSAGE, Some(serde_json::to_value(params)?));
+    pub async fn create_message(
+        &mut self,
+        params: CreateMessageParams,
+    ) -> Result<CreateMessageResult> {
+        let req = self.make_request(
+            METHOD_SAMPLING_CREATE_MESSAGE,
+            Some(serde_json::to_value(params)?),
+        );
         let resp = self.process.send_and_recv(&req).await?;
         if let Some(err) = resp.error {
             return Err(anyhow::anyhow!("Create message failed: {}", err.message));
@@ -211,7 +270,9 @@ impl McpClient {
         let req = self.make_request(METHOD_ROOTS_LIST, None);
         let resp = self.process.send_and_recv(&req).await?;
         let result = resp.result.ok_or_else(|| anyhow::anyhow!("No result"))?;
-        Ok(serde_json::from_value(result.get("roots").cloned().unwrap_or_default())?)
+        Ok(serde_json::from_value(
+            result.get("roots").cloned().unwrap_or_default(),
+        )?)
     }
 
     pub fn set_roots(&mut self, roots: Vec<Root>) {
@@ -229,11 +290,18 @@ impl McpClient {
         self.process.send_notification(&notif).await
     }
 
-    pub async fn notify_cancelled(&self, request_id: serde_json::Value, reason: Option<String>) -> Result<()> {
-        let notif = self.make_notification(NOTIFICATION_CANCELLED, Some(serde_json::json!({
-            "requestId": request_id,
-            "reason": reason
-        })));
+    pub async fn notify_cancelled(
+        &self,
+        request_id: serde_json::Value,
+        reason: Option<String>,
+    ) -> Result<()> {
+        let notif = self.make_notification(
+            NOTIFICATION_CANCELLED,
+            Some(serde_json::json!({
+                "requestId": request_id,
+                "reason": reason
+            })),
+        );
         self.process.send_notification(&notif).await
     }
 
@@ -256,23 +324,38 @@ impl McpClient {
     }
 
     pub fn supports_tools(&self) -> bool {
-        self.server_capabilities.as_ref().and_then(|c| c.tools.as_ref()).is_some()
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.tools.as_ref())
+            .is_some()
     }
 
     pub fn supports_resources(&self) -> bool {
-        self.server_capabilities.as_ref().and_then(|c| c.resources.as_ref()).is_some()
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.resources.as_ref())
+            .is_some()
     }
 
     pub fn supports_prompts(&self) -> bool {
-        self.server_capabilities.as_ref().and_then(|c| c.prompts.as_ref()).is_some()
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.prompts.as_ref())
+            .is_some()
     }
 
     pub fn supports_logging(&self) -> bool {
-        self.server_capabilities.as_ref().and_then(|c| c.logging.as_ref()).is_some()
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.logging.as_ref())
+            .is_some()
     }
 
     pub fn supports_sampling(&self) -> bool {
-        self.server_capabilities.as_ref().and_then(|c| c.sampling.as_ref()).is_some()
+        self.server_capabilities
+            .as_ref()
+            .and_then(|c| c.sampling.as_ref())
+            .is_some()
     }
 }
 
@@ -283,11 +366,14 @@ mod tests {
     #[tokio::test]
     async fn test_initialize_request_format() {
         let mut client = McpClient::new_stdio_sync("echo".into(), vec![]).await;
-        let req = client.make_request(METHOD_INITIALIZE, Some(serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": { "roots": { "listChanged": true }, "sampling": {} },
-            "clientInfo": { "name": "forge", "version": "0.100.0" }
-        })));
+        let req = client.make_request(
+            METHOD_INITIALIZE,
+            Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": { "roots": { "listChanged": true }, "sampling": {} },
+                "clientInfo": { "name": "forge", "version": "0.100.0" }
+            })),
+        );
         assert_eq!(req.jsonrpc, "2.0");
         assert_eq!(req.method, METHOD_INITIALIZE);
         assert_eq!(req.id, serde_json::json!(1));
@@ -296,7 +382,10 @@ mod tests {
     #[tokio::test]
     async fn test_client_roots() {
         let mut client = McpClient::new_stdio_sync("echo".into(), vec![]).await;
-        let roots = vec![Root { uri: "file:///project".into(), name: Some("project".into()) }];
+        let roots = vec![Root {
+            uri: "file:///project".into(),
+            name: Some("project".into()),
+        }];
         client.set_roots(roots);
         assert_eq!(client.get_roots().len(), 1);
     }

@@ -238,11 +238,12 @@ async fn main() -> Result<()> {
             let sandbox = Sandbox::new(project_path.clone(), network)?;
 
             let context = std::sync::Arc::new(tokio::sync::Mutex::new(context));
-            
+
             let mut _watcher = None;
             if watch {
                 let mut w = forge_core::file_watcher::FileWatcher::new(
-                    context.clone() as std::sync::Arc<tokio::sync::Mutex<dyn context::ContextIndex>>,
+                    context.clone()
+                        as std::sync::Arc<tokio::sync::Mutex<dyn context::ContextIndex>>,
                     &project_path,
                     500, // debounce
                 )?;
@@ -283,14 +284,16 @@ async fn main() -> Result<()> {
             model,
             verify,
             format,
-            trace,
+            trace: _,
         } => {
             tracing::info!("Forge v{} starting (exec mode)", env!("CARGO_PKG_VERSION"));
 
             let api_key = resolve_api_key(&provider, api_key)?;
 
             let task = task.or(prompt).ok_or_else(|| {
-                anyhow::anyhow!("Missing task description. Pass it as a positional argument or via --prompt.")
+                anyhow::anyhow!(
+                    "Missing task description. Pass it as a positional argument or via --prompt."
+                )
             })?;
 
             let exec_config = ExecConfig {
@@ -301,8 +304,6 @@ async fn main() -> Result<()> {
                 provider,
                 model,
                 verify,
-                output_format: format.clone(),
-                trace,
             };
 
             let result = run_exec(exec_config).await?;
@@ -358,7 +359,12 @@ async fn main() -> Result<()> {
                         } else {
                             "FAILED"
                         };
-                        println!("[{}] {} — {}", status, t.id, t.result.as_deref().unwrap_or(""));
+                        println!(
+                            "[{}] {} — {}",
+                            status,
+                            t.id,
+                            t.result.as_deref().unwrap_or("")
+                        );
                     }
                     Ok(())
                 }
@@ -366,26 +372,26 @@ async fn main() -> Result<()> {
                     let project_path = std::path::PathBuf::from(&project_path);
                     let worktree_base = project_path.join(".forge").join("worktrees");
 
-                    let orchestrator = agents::MultiAgentOrchestrator::new(
-                        &project_path,
-                        &worktree_base,
-                        4,
-                    )?;
+                    let orchestrator =
+                        agents::MultiAgentOrchestrator::new(&project_path, &worktree_base, 4)?;
 
                     let tasks = orchestrator.list_tasks_from_disk();
                     if tasks.is_empty() {
                         println!("No agents found.");
                     } else {
-                        println!("{:<12} {:<10} {:<40} {}", "ID", "STATUS", "PROMPT", "RESULT");
+                        println!(
+                            "{:<12} {:<10} {:<40} {}",
+                            "ID", "STATUS", "PROMPT", "RESULT"
+                        );
                         println!("{}", "-".repeat(80));
                         for t in &tasks {
                             let status = format!("{:?}", t.status);
-                        let prompt = if t.prompt.chars().count() > 37 {
-                            let truncated: String = t.prompt.chars().take(37).collect();
-                            format!("{truncated}...")
-                        } else {
-                            t.prompt.clone()
-                        };
+                            let prompt = if t.prompt.chars().count() > 37 {
+                                let truncated: String = t.prompt.chars().take(37).collect();
+                                format!("{truncated}...")
+                            } else {
+                                t.prompt.clone()
+                            };
                             let result = t.result.as_deref().unwrap_or("");
                             println!(
                                 "{:<12} {:<10} {:<40} {}",
@@ -402,11 +408,8 @@ async fn main() -> Result<()> {
                     let project_path = std::path::PathBuf::from(&project_path);
                     let worktree_base = project_path.join(".forge").join("worktrees");
 
-                    let orchestrator = agents::MultiAgentOrchestrator::new(
-                        &project_path,
-                        &worktree_base,
-                        4,
-                    )?;
+                    let orchestrator =
+                        agents::MultiAgentOrchestrator::new(&project_path, &worktree_base, 4)?;
 
                     // ponytail: can't resume across processes.  Report
                     // status of persisted tasks.  Merges were already
@@ -423,7 +426,12 @@ async fn main() -> Result<()> {
                             } else {
                                 "RUNNING"
                             };
-                            println!("[{}] {} — {}", status, t.id, t.result.as_deref().unwrap_or("in progress"));
+                            println!(
+                                "[{}] {} — {}",
+                                status,
+                                t.id,
+                                t.result.as_deref().unwrap_or("in progress")
+                            );
                         }
                     }
                     Ok(())
@@ -456,7 +464,11 @@ async fn main() -> Result<()> {
     }
 }
 
-pub fn create_provider_instance(name: &str, model: &str, api_key: &str) -> Result<Arc<dyn ModelProvider>> {
+pub fn create_provider_instance(
+    name: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<Arc<dyn ModelProvider>> {
     provider::create_provider(name, model, api_key)
 }
 
@@ -599,10 +611,15 @@ mod tests {
     #[test]
     fn test_agents_spawn_parsing() {
         let cli = Cli::try_parse_from([
-            "forge", "agents", "spawn",
-            "--prompt", "fix the bug",
-            "--api-key", "test",
-            "--scope", "src/**",
+            "forge",
+            "agents",
+            "spawn",
+            "--prompt",
+            "fix the bug",
+            "--api-key",
+            "test",
+            "--scope",
+            "src/**",
         ]);
         assert!(cli.is_ok());
     }

@@ -31,8 +31,7 @@ impl MockProvider {
             model: model.into(),
             scripted: Mutex::new(std::collections::VecDeque::new()),
             terminal: ChatResponse {
-                content: "Mock provider: task acknowledged. No changes were made."
-                    .to_string(),
+                content: "Mock provider: task acknowledged. No changes were made.".to_string(),
                 tool_calls: Vec::new(),
             },
         }

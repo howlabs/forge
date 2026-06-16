@@ -34,13 +34,25 @@ pub struct AcpError {
 
 impl AcpError {
     pub fn method_not_found(method: &str) -> Self {
-        Self { code: -32601, message: format!("Method not found: {}", method), data: None }
+        Self {
+            code: -32601,
+            message: format!("Method not found: {}", method),
+            data: None,
+        }
     }
     pub fn invalid_params(msg: &str) -> Self {
-        Self { code: -32602, message: msg.into(), data: None }
+        Self {
+            code: -32602,
+            message: msg.into(),
+            data: None,
+        }
     }
     pub fn internal_error(msg: &str) -> Self {
-        Self { code: -32603, message: msg.into(), data: None }
+        Self {
+            code: -32603,
+            message: msg.into(),
+            data: None,
+        }
     }
 }
 

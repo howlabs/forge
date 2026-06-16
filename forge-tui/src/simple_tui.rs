@@ -30,13 +30,19 @@ pub enum ConversationEntry {
     User(String),
     Assistant(String),
     System(String),
-    ToolCall { name: String, result: String },
+    ToolCall {
+        name: String,
+        result: String,
+    },
     Diff {
         path: String,
         old_text: String,
         new_text: String,
     },
-    VerifyResult { passed: bool, logs: String },
+    VerifyResult {
+        passed: bool,
+        logs: String,
+    },
 }
 
 /// Trim long tool output / diffs so a single event cannot flood the panel.
@@ -53,7 +59,9 @@ fn truncate_for_display(text: &str, max: usize) -> String {
 enum AgentUpdate {
     /// A live progress event from the running event loop.
     Progress(forge_core::LoopEvent),
-    Done { steps: usize },
+    Done {
+        steps: usize,
+    },
     Error(String),
 }
 

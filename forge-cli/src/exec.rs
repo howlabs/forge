@@ -158,7 +158,8 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
         )
     })?;
 
-    let provider = crate::create_provider_instance(&config.provider, &config.model, &config.api_key)?;
+    let provider =
+        crate::create_provider_instance(&config.provider, &config.model, &config.api_key)?;
     let forge_toml = load_forge_toml(&config.config_path)?;
     let verify_commands = resolve_verify_commands(&workdir, forge_toml.as_ref());
     let max_retries = forge_toml
@@ -245,11 +246,7 @@ async fn attach_mcp_servers<P: provider::ModelProvider>(
             .with_mcp_client(server.command.clone(), server.args.clone())
             .await
         {
-            tracing::warn!(
-                "Failed to connect MCP server '{}': {} — skipping",
-                label,
-                e
-            );
+            tracing::warn!("Failed to connect MCP server '{}': {} — skipping", label, e);
         } else {
             tracing::info!("Connected MCP server '{}'", label);
         }
@@ -257,8 +254,6 @@ async fn attach_mcp_servers<P: provider::ModelProvider>(
 
     Ok(event_loop)
 }
-
-
 
 fn load_forge_toml(path: &Path) -> Result<Option<ForgeToml>> {
     if !path.exists() {

@@ -50,9 +50,9 @@ pub const PROVIDERS: &[ProviderEntry] = &[
 /// Look up a provider entry by name or alias
 pub fn find_provider(name: &str) -> Option<&'static ProviderEntry> {
     let lower = name.to_lowercase();
-    PROVIDERS.iter().find(|p| {
-        p.name == lower || p.aliases.iter().any(|a| *a == lower)
-    })
+    PROVIDERS
+        .iter()
+        .find(|p| p.name == lower || p.aliases.iter().any(|a| *a == lower))
 }
 
 /// Create an OpenAI-compatible provider from a registry entry

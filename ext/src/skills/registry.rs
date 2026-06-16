@@ -15,7 +15,11 @@ pub struct SkillVersion {
 
 impl SkillVersion {
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -24,9 +28,15 @@ impl SkillVersion {
             return Err(format!("Invalid version: {}", s));
         }
         Ok(Self {
-            major: parts[0].parse::<u32>().map_err(|e: std::num::ParseIntError| e.to_string())?,
-            minor: parts[1].parse::<u32>().map_err(|e: std::num::ParseIntError| e.to_string())?,
-            patch: parts[2].parse::<u32>().map_err(|e: std::num::ParseIntError| e.to_string())?,
+            major: parts[0]
+                .parse::<u32>()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?,
+            minor: parts[1]
+                .parse::<u32>()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?,
+            patch: parts[2]
+                .parse::<u32>()
+                .map_err(|e: std::num::ParseIntError| e.to_string())?,
         })
     }
 }
@@ -55,7 +65,10 @@ pub struct SkillsRegistry {
 
 impl SkillsRegistry {
     pub fn new() -> Self {
-        Self { skills: HashMap::new(), discovery_paths: Vec::new() }
+        Self {
+            skills: HashMap::new(),
+            discovery_paths: Vec::new(),
+        }
     }
 
     pub fn add_discovery_path(&mut self, path: PathBuf) {
@@ -73,7 +86,8 @@ impl SkillsRegistry {
     }
 
     pub fn unregister(&mut self, name: &str) -> Result<()> {
-        self.skills.remove(name)
+        self.skills
+            .remove(name)
             .ok_or_else(|| anyhow::anyhow!("Skill not found: {}", name))?;
         Ok(())
     }
@@ -88,17 +102,21 @@ impl SkillsRegistry {
 
     pub fn search(&self, query: &str) -> Vec<&RegisteredSkill> {
         let query_lower = query.to_lowercase();
-        self.skills.values()
+        self.skills
+            .values()
             .filter(|s| {
                 s.skill.name.to_lowercase().contains(&query_lower)
                     || s.skill.description.to_lowercase().contains(&query_lower)
-                    || s.tags.iter().any(|t| t.to_lowercase().contains(&query_lower))
+                    || s.tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&query_lower))
             })
             .collect()
     }
 
     pub fn by_tag(&self, tag: &str) -> Vec<&RegisteredSkill> {
-        self.skills.values()
+        self.skills
+            .values()
             .filter(|s| s.tags.contains(&tag.to_string()))
             .collect()
     }
