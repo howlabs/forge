@@ -656,12 +656,31 @@ impl SimpleTui {
                         }
                     }
                     KeyCode::Enter => {
-                        if !self.autocomplete_options.is_empty() {
+                        let trimmed = self.input.trim();
+                        let is_valid_complete_command = if trimmed.starts_with('/') {
+                            SlashCommand::parse(trimmed).is_some()
+                        } else {
+                            false
+                        };
+
+                        if is_valid_complete_command {
+                            self.autocomplete_options.clear();
+                            self.autocomplete_index = 0;
+                            if !self.input.trim().is_empty() {
+                                if self.agent_running && !self.is_local_command(&self.input) {
+                                    self.queue_current_input();
+                                } else {
+                                    self.send_message().await;
+                                }
+                            }
+                        } else if !self.autocomplete_options.is_empty() {
                             let option = self.autocomplete_options[self.autocomplete_index].clone();
+                            let prev_input = self.input.clone();
                             self.input = option.clone();
                             self.cursor = self.input.len();
                             self.update_autocomplete_options();
-                            if !option.ends_with(' ') && !option.ends_with('/') {
+                            
+                            if (!option.ends_with(' ') && !option.ends_with('/')) || prev_input == option {
                                 self.autocomplete_options.clear();
                                 self.autocomplete_index = 0;
                                 if !self.input.trim().is_empty() {
