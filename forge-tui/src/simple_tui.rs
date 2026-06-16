@@ -1624,38 +1624,27 @@ impl SimpleTui {
         let mut in_code_block = false;
 
         for entry in &self.conversation {
-            let (label_span, text_color) = match entry {
-                ConversationEntry::User(_) => (
-                    Span::styled(" 👤 YOU ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                    Color::Cyan
-                ),
-                ConversationEntry::Assistant(_) => (
-                    Span::styled(" 🤖 FORGE ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                    Color::Green
-                ),
-                ConversationEntry::System(_) => (
-                    Span::styled(" ⚙️ SYSTEM ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                    Color::Yellow
-                ),
-                ConversationEntry::ToolCall { name, .. } => (
-                    Span::styled(format!(" 🛠️ TOOL: {} ", name), Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                    Color::Magenta
-                ),
-                ConversationEntry::Diff { path, .. } => (
-                    Span::styled(format!(" 📁 DIFF: {} ", path), Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                    Color::Yellow
-                ),
+            let label_span = match entry {
+                ConversationEntry::User(_) => {
+                    Span::styled(" 👤 YOU ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+                }
+                ConversationEntry::Assistant(_) => {
+                    Span::styled(" 🤖 FORGE ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
+                }
+                ConversationEntry::System(_) => {
+                    Span::styled(" ⚙️ SYSTEM ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
+                }
+                ConversationEntry::ToolCall { name, .. } => {
+                    Span::styled(format!(" 🛠️ TOOL: {} ", name), Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD))
+                }
+                ConversationEntry::Diff { path, .. } => {
+                    Span::styled(format!(" 📁 DIFF: {} ", path), Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
+                }
                 ConversationEntry::VerifyResult { passed, .. } => {
                     if *passed {
-                        (
-                            Span::styled(" 🧪 VERIFIED ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                            Color::Green
-                        )
+                        Span::styled(" 🧪 VERIFIED ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
                     } else {
-                        (
-                            Span::styled(" 🧪 FAILED ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)),
-                            Color::Red
-                        )
+                        Span::styled(" 🧪 FAILED ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD))
                     }
                 }
             };
@@ -1665,7 +1654,7 @@ impl SimpleTui {
                 ConversationEntry::Assistant(text) => text.as_str(),
                 ConversationEntry::System(text) => text.as_str(),
                 ConversationEntry::ToolCall { result, .. } => result.as_str(),
-                ConversationEntry::Diff { old_text, new_text, .. } => "",
+                ConversationEntry::Diff { .. } => "",
                 ConversationEntry::VerifyResult { logs, .. } => logs.as_str(),
             };
 
@@ -1679,18 +1668,24 @@ impl SimpleTui {
                 }
             }
 
-            let mut is_first = true;
+            // Header line for each message
+            let header_line = Line::from(vec![
+                label_span.clone(),
+                Span::styled(" ────────────────────────────────────────", Style::default().fg(Color::DarkGray))
+            ]);
+            conversation_lines.push(header_line);
+
             for line in lines {
                 let trimmed = line.trim();
                 if trimmed.starts_with("```") {
                     in_code_block = !in_code_block;
                     if in_code_block {
                         conversation_lines.push(Line::from(vec![
-                            Span::styled("    ┌── Code Block ────────────────────────┐", Style::default().fg(Color::DarkGray))
+                            Span::styled("  ┌── CODE ─────────────────────────────────────────", Style::default().fg(Color::DarkGray))
                         ]));
                     } else {
                         conversation_lines.push(Line::from(vec![
-                            Span::styled("    └── End of Code ───────────────────────┘", Style::default().fg(Color::DarkGray))
+                            Span::styled("  └─────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))
                         ]));
                     }
                     continue;
@@ -1698,23 +1693,14 @@ impl SimpleTui {
 
                 if in_code_block {
                     conversation_lines.push(Line::from(vec![
-                        Span::styled("    │ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
                         Span::styled(line, Style::default().fg(Color::White))
                     ]));
                 } else {
-                    if is_first {
-                        conversation_lines.push(Line::from(vec![
-                            label_span.clone(),
-                            Span::raw(" "),
-                            Span::styled(line, Style::default().fg(text_color))
-                        ]));
-                        is_first = false;
-                    } else {
-                        conversation_lines.push(Line::from(vec![
-                            Span::raw("     │ "),
-                            Span::styled(line, Style::default().fg(text_color))
-                        ]));
-                    }
+                    conversation_lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(line, Style::default().fg(Color::White))
+                    ]));
                 }
             }
             conversation_lines.push(Line::from(""));
@@ -1755,27 +1741,42 @@ impl SimpleTui {
         // 2. Render Diff Viewer (if not empty)
         if !self.diff_hunks.is_empty() {
             let mut diff_lines = Vec::new();
+            let inner_width = left_chunks[1].width.saturating_sub(2) as usize;
+
             for (i, hunk) in self.diff_hunks.iter().enumerate() {
                 let is_selected = i == self.selected_hunk && self.focus == Focus::Diff;
-                let header_style = if is_selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Cyan)
+
+                // Format the state badge text
+                let state_str = match hunk.state {
+                    HunkState::Pending => " PENDING ",
+                    HunkState::Approved => " APPROVED ",
+                    HunkState::Rejected => " REJECTED ",
+                    HunkState::Modified => " MODIFIED ",
                 };
 
-                let state_span = match hunk.state {
-                    HunkState::Pending => Span::styled(" ⏳ PENDING ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                    HunkState::Approved => Span::styled(" ✓ APPROVED ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
-                    HunkState::Rejected => Span::styled(" ✗ REJECTED ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)),
-                    HunkState::Modified => Span::styled(" ~ MODIFIED ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                let header_text = format!(" 📁 {} @ {}", hunk.file_path, hunk.header);
+                
+                // Combine header text and state
+                let state_len = state_str.len() + 4; // "[PENDING]" or similar
+                let max_header_len = inner_width.saturating_sub(state_len + 4);
+                let truncated_header = if header_text.chars().count() > max_header_len {
+                    header_text.chars().take(max_header_len - 1).collect::<String>() + "…"
+                } else {
+                    header_text
+                };
+                
+                let spaces_count = inner_width.saturating_sub(truncated_header.chars().count() + state_len);
+                let spaces = " ".repeat(spaces_count);
+                let full_header_line = format!("{}{}[{}]  ", truncated_header, spaces, state_str);
+
+                let header_style = if is_selected {
+                    Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().bg(Color::DarkGray).fg(Color::White)
                 };
 
                 diff_lines.push(Line::from(vec![
-                    Span::styled(&hunk.file_path, Style::default().fg(self.theme_fg())),
-                    Span::raw(": "),
-                    Span::styled(&hunk.header, header_style),
-                    Span::raw(" "),
-                    state_span,
+                    Span::styled(full_header_line, header_style)
                 ]));
 
                 for removal in hunk.removals.iter().take(2) {
@@ -1803,6 +1804,8 @@ impl SimpleTui {
                         Style::default().fg(Color::DarkGray),
                     )]));
                 }
+                
+                diff_lines.push(Line::from(""));
             }
 
             let diff_border_style = Style::default().fg(self.theme_border(self.focus == Focus::Diff));
