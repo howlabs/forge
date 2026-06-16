@@ -233,7 +233,7 @@ mod tests {
         }
         fn resolve_symbol(&self, _name: &str) -> Option<context::symbols::Symbol> { None }
     }
-    use std::fs::{self, File};
+    use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
 
