@@ -12,6 +12,9 @@ use agents::Orchestrator;
 mod doctor;
 mod exec;
 mod mcp;
+mod plain;
+mod release_check;
+mod serve;
 
 use exec::{run_exec, ExecConfig};
 
@@ -62,6 +65,10 @@ enum Commands {
         /// Resume a task from checkpoint (v0.180.0)
         #[arg(long, value_name = "TASK_ID")]
         resume: Option<String>,
+
+        /// Resume a persisted plain-REPL JSONL session
+        #[arg(long, value_name = "SESSION_ID")]
+        session: Option<String>,
 
         /// Launch TUI mode (interactive terminal UI)
         #[arg(long, default_value_t = false)]
@@ -141,6 +148,59 @@ enum Commands {
         #[command(subcommand)]
         action: McpAction,
     },
+    /// Persisted plain-REPL sessions
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+    /// Provider/model catalog helpers
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
+    /// Semantic context index helpers
+    Context {
+        #[command(subcommand)]
+        action: ContextAction,
+    },
+    /// Run the configured verify profile without invoking an agent
+    Verify {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Print detected commands without running them
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Serve a local read-only session/model API for remote/team workflows
+    Serve {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Bind address for the local HTTP server
+        #[arg(long, default_value = "127.0.0.1:4545")]
+        bind: String,
+
+        /// Serve exactly one request, useful for smoke tests
+        #[arg(long, default_value_t = false)]
+        once: bool,
+    },
+    /// Run release-readiness checks for v1.0 hardening
+    ReleaseCheck {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Emit JSON instead of text
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -154,6 +214,68 @@ enum McpAction {
         /// Network access mode for sandbox-backed tools (off, on, auto)
         #[arg(short, long, default_value = "off")]
         network: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionAction {
+    /// List persisted JSONL sessions
+    List {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+    },
+
+    /// Print a summary for a persisted JSONL session
+    Resume {
+        /// Session id from `.forge/sessions/<id>.jsonl`
+        session_id: String,
+
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ModelsAction {
+    /// List known provider/model metadata
+    List {
+        /// Filter by provider name
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Emit JSON instead of a table
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ContextAction {
+    /// Build the persisted semantic context index
+    Build {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Store directory for context artifacts
+        #[arg(long)]
+        store_dir: Option<String>,
+    },
+
+    /// Show persisted context index status
+    Status {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+    },
+
+    /// Remove the persisted semantic context index
+    Clear {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
     },
 }
 
@@ -217,6 +339,7 @@ async fn main() -> Result<()> {
             network,
             watch,
             resume,
+            session,
             tui,
             plain,
         } => {
@@ -269,7 +392,16 @@ async fn main() -> Result<()> {
                 .await?;
             } else {
                 tracing::info!("Launching plain REPL mode with {} provider", provider);
-                launch_plain_mode(provider.clone(), model, api_key, context, sandbox).await?;
+                launch_plain_mode(
+                    provider.clone(),
+                    model,
+                    api_key,
+                    context,
+                    sandbox,
+                    project_path,
+                    session,
+                )
+                .await?;
             }
 
             Ok(())
@@ -379,10 +511,7 @@ async fn main() -> Result<()> {
                     if tasks.is_empty() {
                         println!("No agents found.");
                     } else {
-                        println!(
-                            "{:<12} {:<10} {:<40} {}",
-                            "ID", "STATUS", "PROMPT", "RESULT"
-                        );
+                        println!("{:<12} {:<10} {:<40} RESULT", "ID", "STATUS", "PROMPT");
                         println!("{}", "-".repeat(80));
                         for t in &tasks {
                             let status = format!("{:?}", t.status);
@@ -461,7 +590,182 @@ async fn main() -> Result<()> {
                 mcp::serve(project_path, network).await
             }
         },
+        Commands::Session { action } => match action {
+            SessionAction::List { project_path } => {
+                plain::list_sessions(std::path::Path::new(&project_path))
+            }
+            SessionAction::Resume {
+                session_id,
+                project_path,
+            } => plain::resume_session(std::path::Path::new(&project_path), &session_id),
+        },
+        Commands::Models { action } => match action {
+            ModelsAction::List { provider, json } => list_models(provider.as_deref(), json),
+        },
+        Commands::Context { action } => match action {
+            ContextAction::Build {
+                project_path,
+                store_dir,
+            } => context_build(&project_path, store_dir.as_deref()),
+            ContextAction::Status { project_path } => context_status(&project_path),
+            ContextAction::Clear { project_path } => context_clear(&project_path),
+        },
+        Commands::Verify {
+            project_path,
+            dry_run,
+            json,
+        } => run_verify_command(&project_path, dry_run, json).await,
+        Commands::Serve {
+            project_path,
+            bind,
+            once,
+        } => serve::serve(serve::ServeConfig {
+            project_path: std::path::PathBuf::from(project_path),
+            bind,
+            once,
+        }),
+        Commands::ReleaseCheck { project_path, json } => {
+            let exit_code = release_check::run(release_check::ReleaseCheckConfig {
+                project_path: std::path::PathBuf::from(project_path),
+                json,
+            })?;
+            std::process::exit(exit_code);
+        }
     }
+}
+
+fn list_models(provider_filter: Option<&str>, json: bool) -> Result<()> {
+    let models = provider::list_models(provider_filter);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&models)?);
+        return Ok(());
+    }
+
+    println!(
+        "{:<12} {:<32} {:>10} {:<8} RECOMMENDED",
+        "PROVIDER", "MODEL", "CTX", "DEFAULT"
+    );
+    for model in models {
+        println!(
+            "{:<12} {:<32} {:>10} {:<8} {}",
+            model.provider,
+            model.model,
+            model.context_tokens,
+            if model.default { "yes" } else { "no" },
+            model.recommended_for.join(",")
+        );
+    }
+    Ok(())
+}
+
+fn context_status(project_path: &str) -> Result<()> {
+    let root = std::path::Path::new(project_path);
+    let store_dir = root.join(".forge/context");
+    let engine = context::ContextEngine::new(root)?;
+    let (files, symbols, chunks) = engine.stats();
+    println!("context_store={}", store_dir.display());
+    println!("exists={}", store_dir.exists());
+    println!("files={files}");
+    println!("symbols={symbols}");
+    println!("chunks={chunks}");
+    Ok(())
+}
+
+fn context_build(project_path: &str, store_dir: Option<&str>) -> Result<()> {
+    let root = std::path::Path::new(project_path);
+    let store_dir = store_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join(".forge/context"));
+    let embedder = std::sync::Arc::new(context::vector::ApiEmbedder::new(
+        "https://api.openai.com/v1".to_string(),
+        std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        "text-embedding-3-small".to_string(),
+        1536,
+    ));
+    let engine = context::ContextEngine::index_dir(root, &store_dir, embedder)?;
+    let (files, symbols, chunks) = engine.stats();
+    println!("context_store={}", store_dir.display());
+    println!("files={files}");
+    println!("symbols={symbols}");
+    println!("chunks={chunks}");
+    Ok(())
+}
+
+fn context_clear(project_path: &str) -> Result<()> {
+    let store_dir = std::path::Path::new(project_path).join(".forge/context");
+    if store_dir.exists() {
+        std::fs::remove_dir_all(&store_dir)?;
+        println!("Removed context index {}", store_dir.display());
+    } else {
+        println!("No context index at {}", store_dir.display());
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct CliVerifyReport {
+    passed: bool,
+    dry_run: bool,
+    commands: Vec<String>,
+    duration_ms: u64,
+    logs: String,
+}
+
+async fn run_verify_command(project_path: &str, dry_run: bool, json: bool) -> Result<()> {
+    let workdir = std::path::Path::new(project_path);
+    let commands = verify::detect_verify_commands(workdir).unwrap_or_default();
+    if dry_run {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&CliVerifyReport {
+                    passed: !commands.is_empty(),
+                    dry_run: true,
+                    commands,
+                    duration_ms: 0,
+                    logs: String::new(),
+                })?
+            );
+        } else if commands.is_empty() {
+            println!("No verify commands detected.");
+        } else {
+            for command in commands {
+                println!("{command}");
+            }
+        }
+        return Ok(());
+    }
+
+    let verifier = verify::BuildVerifier::new();
+    let report = forge_core::Verifier::verify(&verifier, workdir).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&CliVerifyReport {
+                passed: report.passed,
+                dry_run: false,
+                commands,
+                duration_ms: report.duration_ms,
+                logs: report.logs.clone(),
+            })?
+        );
+        if !report.passed {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    println!(
+        "{} verify in {}ms",
+        if report.passed { "PASS" } else { "FAIL" },
+        report.duration_ms
+    );
+    if !report.logs.trim().is_empty() {
+        println!("{}", report.logs);
+    }
+    if !report.passed {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 pub fn create_provider_instance(
@@ -546,12 +850,26 @@ async fn launch_plain_mode(
     api_key: String,
     context: std::sync::Arc<tokio::sync::Mutex<context::ContextEngine>>,
     sandbox: Sandbox,
+    project_path: String,
+    resume_session: Option<String>,
 ) -> Result<()> {
-    let _ = (provider_name, model, api_key, context, sandbox);
-    println!(
-        "Plain REPL mode is not interactive yet. Use --tui for the EventLoop-backed TUI or `forge exec` for headless tasks."
-    );
-    Ok(())
+    let provider = create_provider_instance(&provider_name, &model, &api_key)?;
+    let _ = context;
+    let context = context::ContextEngine::new(&project_path)?;
+    plain::run_plain_repl(
+        provider,
+        context,
+        sandbox,
+        plain::PlainReplConfig {
+            provider_name,
+            model,
+            project_path: std::path::PathBuf::from(&project_path),
+            config_path: std::path::PathBuf::from("forge.toml"),
+            max_verify_retries: 5,
+            resume_session,
+        },
+    )
+    .await
 }
 
 /// Resume a task from checkpoint (v0.180.0)

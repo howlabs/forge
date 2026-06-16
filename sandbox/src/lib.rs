@@ -10,6 +10,31 @@ pub struct Sandbox {
     network_mode: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PatchPreview {
+    pub path: String,
+    pub canonical_path: PathBuf,
+    pub before: String,
+    pub after: String,
+    pub old_text: String,
+    pub new_text: String,
+}
+
+impl PatchPreview {
+    pub fn summary(&self) -> String {
+        let before_lines = self.before.lines().count();
+        let after_lines = self.after.lines().count();
+        format!(
+            "{}: {} lines -> {} lines, replace {} chars with {} chars",
+            self.path,
+            before_lines,
+            after_lines,
+            self.old_text.len(),
+            self.new_text.len()
+        )
+    }
+}
+
 impl Sandbox {
     pub fn new(project_path: impl Into<PathBuf>, network_mode: impl Into<String>) -> Result<Self> {
         let path = project_path.into();
@@ -136,9 +161,21 @@ impl Sandbox {
 
     /// Apply a diff edit to a file
     pub async fn diff_edit(&self, path: &str, old_text: &str, new_text: &str) -> Result<()> {
+        let preview = self.preview_diff_edit(path, old_text, new_text).await?;
+        std::fs::write(&preview.canonical_path, preview.after)
+            .map_err(|e| anyhow::anyhow!("Failed to write edited file {}: {}", path, e))
+    }
+
+    /// Preview a diff edit without writing it.
+    pub async fn preview_diff_edit(
+        &self,
+        path: &str,
+        old_text: &str,
+        new_text: &str,
+    ) -> Result<PatchPreview> {
         self.validate_relative_path(path)?;
         let full_path = self.project_path.join(path);
-        debug!("Applying diff edit to: {}", full_path.display());
+        debug!("Previewing diff edit for: {}", full_path.display());
 
         let canonical = full_path
             .canonicalize()
@@ -155,8 +192,14 @@ impl Sandbox {
             return Err(anyhow::anyhow!("Old text not found in file: {}", path));
         }
 
-        std::fs::write(&canonical, new_content)
-            .map_err(|e| anyhow::anyhow!("Failed to write edited file {}: {}", path, e))
+        Ok(PatchPreview {
+            path: path.to_string(),
+            canonical_path: canonical,
+            before: content,
+            after: new_content,
+            old_text: old_text.to_string(),
+            new_text: new_text.to_string(),
+        })
     }
 
     fn validate_command_policy(&self, command: &str) -> Result<()> {

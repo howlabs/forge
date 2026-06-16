@@ -267,7 +267,7 @@ impl MultiAgentOrchestrator {
                 }
             }
         }
-        tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
         tasks
     }
 

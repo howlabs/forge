@@ -356,6 +356,24 @@ pub enum LoopEvent {
 /// Best-effort sender for [`LoopEvent`]s.
 pub type LoopEventSender = tokio::sync::mpsc::UnboundedSender<LoopEvent>;
 
+/// Runtime approval policy for potentially mutating tools. Safe read-only
+/// tools are always allowed; callers such as the plain REPL can require an
+/// explicit `/approve session` before writes or command execution.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolPolicy {
+    pub allow_writes: bool,
+    pub allow_commands: bool,
+}
+
+impl Default for ToolPolicy {
+    fn default() -> Self {
+        Self {
+            allow_writes: true,
+            allow_commands: true,
+        }
+    }
+}
+
 /// Core event loop: observe -> think -> act
 pub struct EventLoop<P: ModelProvider> {
     provider: P,
@@ -373,6 +391,7 @@ pub struct EventLoop<P: ModelProvider> {
     mcp_server: Option<SharedMcpServer>,
     /// Optional observer for live progress events (e.g. the TUI).
     observer: Option<LoopEventSender>,
+    tool_policy: ToolPolicy,
 }
 
 impl<P: ModelProvider> EventLoop<P> {
@@ -391,7 +410,37 @@ impl<P: ModelProvider> EventLoop<P> {
             mcp_tools: Vec::new(),
             mcp_server: None,
             observer: None,
+            tool_policy: ToolPolicy::default(),
         }
+    }
+
+    /// Replace the task prompt while retaining provider/session wiring. This
+    /// powers the plain REPL, where each user prompt is a new task turn.
+    pub fn with_task(mut self, task: String) -> Self {
+        self.task = task;
+        self.running = true;
+        self.history.clear();
+        self.steps = 0;
+        self
+    }
+
+    /// Queue a new interactive REPL turn while preserving prior conversation
+    /// context. The first turn still lets [`run`] construct the system prompt;
+    /// later turns append the user's request directly to the existing history.
+    pub fn with_repl_turn(mut self, task: String) -> Self {
+        self.task = task.clone();
+        self.running = true;
+        self.steps = 0;
+        if !self.history.is_empty() {
+            self.history.push(Message::user(task));
+        }
+        self
+    }
+
+    /// Set approval policy for write/edit/run tools.
+    pub fn with_tool_policy(mut self, tool_policy: ToolPolicy) -> Self {
+        self.tool_policy = tool_policy;
+        self
     }
 
     /// Set the ContextIndex for symbol verification (v0.150.0)
@@ -636,6 +685,11 @@ impl<P: ModelProvider> EventLoop<P> {
             "read_file" => self.tool_read_file(tool_call).await,
             "write_file" => self.tool_write_file(tool_call).await,
             "run_command" => {
+                if !self.tool_policy.allow_commands {
+                    return Err(anyhow::anyhow!(
+                        "run_command requires approval in this session. Use /approve session to allow command execution."
+                    ));
+                }
                 let command: String = tool_call.get_arg("command")?;
                 let output = self.sandbox.run_command(&command).await?;
                 debug!("Command output: {}", output);
@@ -665,6 +719,11 @@ impl<P: ModelProvider> EventLoop<P> {
     }
 
     async fn tool_write_file(&self, tool_call: ToolCall) -> Result<String> {
+        if !self.tool_policy.allow_writes {
+            return Err(anyhow::anyhow!(
+                "write_file requires approval in this session. Use /approve session to allow file edits."
+            ));
+        }
         let path: String = tool_call.get_arg("path")?;
         let content: String = tool_call.get_arg("content")?;
         self.sandbox.write_file(&path, &content).await?;
@@ -677,6 +736,11 @@ impl<P: ModelProvider> EventLoop<P> {
     }
 
     async fn tool_diff_edit(&mut self, tool_call: ToolCall) -> Result<String> {
+        if !self.tool_policy.allow_writes {
+            return Err(anyhow::anyhow!(
+                "diff_edit requires approval in this session. Use /approve session to allow file edits."
+            ));
+        }
         let path: String = tool_call.get_arg("path")?;
         let old_text: String = tool_call.get_arg("old_text")?;
         let new_text: String = tool_call.get_arg("new_text")?;
@@ -960,6 +1024,32 @@ mod tests {
             std::fs::read_to_string(temp_dir.path().join("output.txt")).unwrap(),
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn test_tool_policy_blocks_writes_without_approval() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let provider = MockProvider::new(vec![]);
+        let context = ContextEngine::new(temp_dir.path()).unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+        let mut event_loop = EventLoop::new(provider, context, sandbox, "write output".to_string())
+            .with_tool_policy(ToolPolicy {
+                allow_writes: false,
+                allow_commands: true,
+            });
+
+        let result = event_loop
+            .execute_tool_with_result(tool_call(
+                "write_file",
+                arg_map(&[
+                    ("path", serde_json::json!("blocked.txt")),
+                    ("content", serde_json::json!("blocked")),
+                ]),
+            ))
+            .await;
+
+        assert!(result.unwrap_err().to_string().contains("approval"));
+        assert!(!temp_dir.path().join("blocked.txt").exists());
     }
 
     #[tokio::test]

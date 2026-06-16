@@ -45,7 +45,7 @@ impl BuildVerifier {
     }
 }
 
-fn resolve_verify_commands(workdir: &Path) -> Option<Vec<String>> {
+pub fn resolve_verify_commands(workdir: &Path) -> Option<Vec<String>> {
     let mut auto_detect = true;
     if let Ok(content) = std::fs::read_to_string(workdir.join("forge.toml")) {
         if let Ok(toml) = toml::from_str::<ForgeToml>(&content) {
@@ -67,7 +67,7 @@ fn resolve_verify_commands(workdir: &Path) -> Option<Vec<String>> {
     }
 }
 
-fn detect_verify_commands(workdir: &Path) -> Option<Vec<String>> {
+pub fn detect_verify_commands(workdir: &Path) -> Option<Vec<String>> {
     if workdir.join("Cargo.toml").exists() {
         return Some(vec![
             "cargo build --quiet".into(),
