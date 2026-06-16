@@ -42,6 +42,12 @@ pub enum SlashCommand {
     Help,
     /// Change theme: /theme <dark|light|safe>
     Theme { theme: String },
+    /// Connect to provider: /connect <provider> [model] [api_key]
+    Connect {
+        provider: String,
+        model: Option<String>,
+        api_key: Option<String>,
+    },
 }
 
 impl SlashCommand {
@@ -81,6 +87,11 @@ impl SlashCommand {
             "theme" if parts.len() > 1 => SlashCommand::Theme {
                 theme: parts[1].to_string(),
             },
+            "connect" if parts.len() > 1 => SlashCommand::Connect {
+                provider: parts[1].to_string(),
+                model: parts.get(2).map(|s| s.to_string()),
+                api_key: parts.get(3).map(|s| s.to_string()),
+            },
             _ => return None,
         })
     }
@@ -100,6 +111,9 @@ impl SlashCommand {
             SlashCommand::Init => "Initialize Forge in current directory".to_string(),
             SlashCommand::Help => "Show this help message".to_string(),
             SlashCommand::Theme { .. } => "Change TUI theme (dark/light/safe)".to_string(),
+            SlashCommand::Connect { .. } => {
+                "Connect to provider (e.g., /connect gemini gemini-1.5-pro)".to_string()
+            }
         }
     }
 }
@@ -184,6 +198,7 @@ impl CommandPalette {
             "/review [path]",
             "/init",
             "/theme <dark|light|safe>",
+            "/connect <provider> [model] [api_key]",
             "/help",
         ]
     }

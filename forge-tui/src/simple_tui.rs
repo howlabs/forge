@@ -130,6 +130,27 @@ pub struct SimpleTui {
     did_stream_chunk: bool,
 }
 
+fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> String {
+    if let Some(key) = explicit.filter(|k| !k.is_empty()) {
+        return key;
+    }
+    let lower = provider_name.to_lowercase();
+    if lower == "mock" || lower == "local" {
+        return String::new();
+    }
+    
+    let env_var = match lower.as_str() {
+        "openai" => "OPENAI_API_KEY",
+        "zai" => "ZAI_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
+        _ => "FORGE_API_KEY",
+    };
+    
+    std::env::var(env_var).unwrap_or_default()
+}
+
 impl SimpleTui {
     /// Create new SimpleTui with provider
     pub fn new(config: TuiConfig, provider: Arc<dyn ModelProvider>) -> Self {
@@ -497,7 +518,86 @@ impl SimpleTui {
                         }
                     }
                     SlashCommand::Model { model } => {
-                        self.add_entry(ConversationEntry::System(format!("Model changed to {}", model)));
+                        if let Some(info) = provider::MODEL_CATALOG.iter().find(|m| m.model == model) {
+                            let key = resolve_api_key(info.provider, None);
+                            if key.is_empty() && info.provider != "mock" {
+                                self.add_entry(ConversationEntry::System(format!(
+                                    "Error: API key not found for provider '{}'. Please set the environment variable.",
+                                    info.provider
+                                )));
+                            } else {
+                                match provider::create_provider(info.provider, info.model, &key) {
+                                    Ok(new_provider) => {
+                                        self.provider = new_provider;
+                                        self.add_entry(ConversationEntry::System(format!(
+                                            "Model switched to {} (provider: {})",
+                                            info.model, info.provider
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        self.add_entry(ConversationEntry::System(format!(
+                                            "Error changing model: {}",
+                                            e
+                                        )));
+                                    }
+                                }
+                            }
+                        } else {
+                            let current_model = self.provider.model();
+                            let current_provider = provider::MODEL_CATALOG.iter()
+                                .find(|m| m.model == current_model)
+                                .map(|m| m.provider)
+                                .unwrap_or("openai");
+                                
+                            let key = resolve_api_key(current_provider, None);
+                            match provider::create_provider(current_provider, &model, &key) {
+                                Ok(new_provider) => {
+                                    self.provider = new_provider;
+                                    self.add_entry(ConversationEntry::System(format!(
+                                        "Model switched to custom model {} on provider {}",
+                                        model, current_provider
+                                    )));
+                                }
+                                Err(e) => {
+                                    self.add_entry(ConversationEntry::System(format!(
+                                        "Error changing model: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    SlashCommand::Connect { provider, model, api_key } => {
+                        let provider_lower = provider.to_lowercase();
+                        let resolved_model = model.clone().unwrap_or_else(|| {
+                            provider::default_model(&provider_lower)
+                                .map(|m| m.model.to_string())
+                                .unwrap_or_else(|| "default".to_string())
+                        });
+                        
+                        let key = resolve_api_key(&provider_lower, api_key);
+                        if key.is_empty() && provider_lower != "mock" {
+                            self.add_entry(ConversationEntry::System(format!(
+                                "Error: No API key resolved for provider '{}'. Please pass it or set the environment variable.",
+                                provider
+                            )));
+                        } else {
+                            match provider::create_provider(&provider_lower, &resolved_model, &key) {
+                                Ok(new_provider) => {
+                                    self.provider = new_provider;
+                                    self.add_entry(ConversationEntry::System(format!(
+                                        "Successfully connected to provider '{}' using model '{}'!",
+                                        provider, resolved_model
+                                    )));
+                                }
+                                Err(e) => {
+                                    self.add_entry(ConversationEntry::System(format!(
+                                        "Failed to connect to provider '{}': {}",
+                                        provider, e
+                                    )));
+                                }
+                            }
+                        }
                     }
                     SlashCommand::Resume { task_id } => {
                         self.add_entry(ConversationEntry::System(format!("Resuming task from checkpoint: {}", task_id)));
@@ -1834,5 +1934,26 @@ mod tests {
         // Starting a new task should reset it
         tui.start_agent_task("new task".to_string());
         assert!(!tui.has_exact_tokens);
+    }
+
+    #[tokio::test]
+    async fn test_slash_command_model_and_connect() {
+        let mut tui = test_tui();
+        
+        // Test switching to a model in the catalog (will use mock provider info)
+        tui.input = "/model mock".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+            
+        assert_eq!(tui.provider.model(), "mock");
+        
+        // Test connect to mock provider explicitly
+        tui.input = "/connect mock mock-model".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+            
+        assert_eq!(tui.provider.model(), "mock-model");
     }
 }
