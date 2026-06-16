@@ -346,8 +346,8 @@ async fn main() -> Result<()> {
             tracing::info!("Forge v{} starting (REPL mode)", env!("CARGO_PKG_VERSION"));
 
             // Handle resume command (v0.180.0)
-            if let Some(task_id) = resume {
-                return resume_task(&task_id, &project_path);
+            if let Some(task_id) = &resume {
+                verify_checkpoint(task_id, &project_path)?;
             }
 
             let api_key = resolve_api_key(&provider, api_key)?;
@@ -388,6 +388,7 @@ async fn main() -> Result<()> {
                     context,
                     sandbox,
                     project_path,
+                    resume,
                 )
                 .await?;
             } else {
@@ -400,6 +401,7 @@ async fn main() -> Result<()> {
                     sandbox,
                     project_path,
                     session,
+                    resume,
                 )
                 .await?;
             }
@@ -822,6 +824,7 @@ async fn launch_tui_mode(
     _context: std::sync::Arc<tokio::sync::Mutex<context::ContextEngine>>,
     _sandbox: Sandbox,
     project_path: String,
+    resume: Option<String>,
 ) -> Result<()> {
     // Create provider based on registry
     let provider = create_provider_instance(&provider_name, &model, &api_key)?;
@@ -837,7 +840,7 @@ async fn launch_tui_mode(
     tracing::info!("Project path: {}", project_path);
 
     // Create and run TUI
-    let mut tui = SimpleTui::with_event_loop(config, provider);
+    let mut tui = SimpleTui::with_event_loop(config, provider).with_auto_resume(resume);
     tui.run().await?;
 
     Ok(())
@@ -852,6 +855,7 @@ async fn launch_plain_mode(
     sandbox: Sandbox,
     project_path: String,
     resume_session: Option<String>,
+    resume_task: Option<String>,
 ) -> Result<()> {
     let provider = create_provider_instance(&provider_name, &model, &api_key)?;
     let _ = context;
@@ -867,17 +871,18 @@ async fn launch_plain_mode(
             config_path: std::path::PathBuf::from("forge.toml"),
             max_verify_retries: 5,
             resume_session,
+            resume_task,
         },
     )
     .await
 }
 
-/// Resume a task from checkpoint (v0.180.0)
-fn resume_task(task_id: &str, project_path: &str) -> Result<()> {
+/// Verify checkpoint and display info (v0.180.0)
+fn verify_checkpoint(task_id: &str, project_path: &str) -> Result<()> {
     use std::path::PathBuf;
     use verify::FileCheckpointStore;
 
-    tracing::info!("Resuming task {} from checkpoint", task_id);
+    tracing::info!("Verifying checkpoint for task {}", task_id);
 
     let store_path = PathBuf::from(project_path).join(".forge/checkpoints");
     let store = FileCheckpointStore::new(store_path)?;
@@ -887,24 +892,11 @@ fn resume_task(task_id: &str, project_path: &str) -> Result<()> {
 
     match checkpoint {
         Some(checkpoint) => {
-            tracing::info!(
-                "Found checkpoint for task {} at step {}",
-                task_id,
-                checkpoint.step
-            );
-            tracing::info!("State size: {} bytes", checkpoint.state.len());
-            tracing::info!("Timestamp: {:?}", checkpoint.timestamp);
-
-            // TODO: Restore state and continue execution
-            // For v0.180.0 MVP, just display checkpoint info
-            println!("Task {} resumed from step {}", task_id, checkpoint.step);
+            println!("Resuming task {} from checkpoint at step {}", task_id, checkpoint.step);
             println!("State size: {} bytes", checkpoint.state.len());
-            println!("To continue: Implement state restoration and execution");
-
             Ok(())
         }
         None => {
-            tracing::error!("No checkpoint found for task {}", task_id);
             anyhow::bail!("No checkpoint found for task {}", task_id)
         }
     }

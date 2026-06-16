@@ -18,6 +18,7 @@ pub struct PlainReplConfig {
     pub config_path: PathBuf,
     pub max_verify_retries: usize,
     pub resume_session: Option<String>,
+    pub resume_task: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -165,10 +166,23 @@ where
     let logger_for_events = logger.clone();
     let state_for_events = state.clone();
     tokio::spawn(async move {
+        let mut did_stream = false;
         while let Some(event) = rx.recv().await {
             let record = match event {
+                LoopEvent::AssistantMessageChunk { delta } => {
+                    print!("{delta}");
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                    did_stream = true;
+                    continue;
+                }
                 LoopEvent::AssistantMessage { step, content } => {
-                    println!("\n{content}\n");
+                    if did_stream {
+                        println!();
+                        did_stream = false;
+                    } else {
+                        println!("\n{content}\n");
+                    }
                     SessionRecord::Assistant {
                         step,
                         content,
@@ -234,8 +248,39 @@ where
         }
     });
 
+    let initial_task = if let Some(task_id) = &cfg.resume_task {
+        format!("Resume task {}", task_id)
+    } else {
+        String::new()
+    };
+
     let mut event_loop =
-        EventLoop::new(provider, context, sandbox, String::new()).with_observer(tx);
+        EventLoop::new(provider, context, sandbox, initial_task).with_observer(tx);
+
+    if cfg.resume_task.is_some() {
+        let policy = {
+            let locked = state.lock().unwrap();
+            ToolPolicy {
+                allow_writes: locked.approve_session,
+                allow_commands: locked.approve_session,
+            }
+        };
+        event_loop = event_loop.with_tool_policy(policy);
+        match event_loop.run().await {
+            Ok(steps) => {
+                let mut locked = state.lock().unwrap();
+                locked.cost.tasks += 1;
+                locked.cost.completion_tokens += steps as u64 * 128;
+                locked.cost.total_tokens =
+                    locked.cost.prompt_tokens + locked.cost.completion_tokens;
+                logger.append(&SessionRecord::Cost {
+                    estimate: locked.cost.clone(),
+                    ts: now(),
+                })?;
+            }
+            Err(e) => eprintln!("error: {e:#}"),
+        }
+    }
 
     loop {
         print!("forge> ");

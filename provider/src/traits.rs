@@ -17,6 +17,14 @@ pub trait ModelProvider: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+
+    /// Send a chat request and return a stream of events
+    async fn chat_stream(
+        &self,
+        _messages: &[Message],
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        Err(anyhow::anyhow!("Streaming not supported for this provider"))
+    }
 }
 
 /// Streaming model provider interface
@@ -38,4 +46,16 @@ impl<T: ModelProvider + ?Sized> ModelProvider for Arc<T> {
     fn model(&self) -> &str {
         (**self).model()
     }
+
+    fn supports_streaming(&self) -> bool {
+        (**self).supports_streaming()
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        (**self).chat_stream(messages).await
+    }
 }
+

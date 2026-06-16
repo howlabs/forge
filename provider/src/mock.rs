@@ -10,7 +10,7 @@
 //! loop always terminates.
 
 use super::traits::ModelProvider;
-use super::types::{ChatResponse, Message};
+use super::types::{ChatResponse, Message, StreamEvent};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Mutex;
@@ -58,6 +58,46 @@ impl ModelProvider for MockProvider {
 
     fn model(&self) -> &str {
         &self.model
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        let response = self.chat(messages).await?;
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        tokio::spawn(async move {
+            if !response.content.is_empty() {
+                for word in response.content.split_inclusive(' ') {
+                    let _ = tx.send(StreamEvent::Delta { content: word.to_string() }).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                }
+            }
+            for tc in response.tool_calls {
+                let _ = tx.send(StreamEvent::ToolCallStart {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                }).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+
+                if let Ok(arg_str) = serde_json::to_string(&tc.arguments) {
+                    let _ = tx.send(StreamEvent::ToolCallArgument {
+                        id: tc.id.clone(),
+                        argument: arg_str,
+                    }).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                }
+
+                let _ = tx.send(StreamEvent::ToolCallEnd { id: tc.id }).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            }
+            let _ = tx.send(StreamEvent::Done { usage: response.usage }).await;
+        });
+        Ok(rx)
     }
 }
 

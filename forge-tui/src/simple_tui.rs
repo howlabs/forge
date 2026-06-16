@@ -57,10 +57,20 @@ fn truncate_for_display(text: &str, max: usize) -> String {
     format!("{kept}… (truncated)")
 }
 
-#[derive(Debug)]
+pub struct PendingApproval {
+    pub tool_name: String,
+    pub details: String,
+    pub tx: tokio::sync::oneshot::Sender<bool>,
+}
+
 enum AgentUpdate {
     /// A live progress event from the running event loop.
     Progress(forge_core::LoopEvent),
+    ApprovalRequired {
+        tool_name: String,
+        details: String,
+        tx: tokio::sync::oneshot::Sender<bool>,
+    },
     Done {
         steps: usize,
     },
@@ -110,10 +120,14 @@ pub struct SimpleTui {
     start_time: Option<std::time::Instant>,
     plan_mode: bool,
     checkpoint_available: Option<String>,
+    auto_resume_task: Option<String>,
+    has_exact_tokens: bool,
+    pending_approval: Option<PendingApproval>,
     theme_mode: ThemeMode,
     stream_queue: Vec<char>,
     autocomplete_options: Vec<String>,
     autocomplete_index: usize,
+    did_stream_chunk: bool,
 }
 
 impl SimpleTui {
@@ -145,16 +159,26 @@ impl SimpleTui {
             start_time: None,
             plan_mode: false,
             checkpoint_available: None,
+            auto_resume_task: None,
+            has_exact_tokens: false,
+            pending_approval: None,
             theme_mode: ThemeMode::Dark,
             stream_queue: Vec::new(),
             autocomplete_options: Vec::new(),
             autocomplete_index: 0,
+            did_stream_chunk: false,
         }
     }
 
     /// Create new SimpleTui with provider-backed EventLoop integration.
     pub fn with_event_loop(config: TuiConfig, provider: Arc<dyn ModelProvider>) -> Self {
         Self::new(config, provider)
+    }
+
+    /// Set initial task to auto-resume on startup
+    pub fn with_auto_resume(mut self, task_id: Option<String>) -> Self {
+        self.auto_resume_task = task_id;
+        self
     }
 
     /// Run the TUI
@@ -187,6 +211,12 @@ impl SimpleTui {
             "Press Shift+Tab to toggle Plan Mode, Tab to cycle pane focus, 'q' to quit.".to_string(),
         ));
 
+        // Auto-resume task if requested
+        if let Some(task_id) = self.auto_resume_task.take() {
+            self.add_entry(ConversationEntry::System(format!("Resuming task from checkpoint: {}", task_id)));
+            self.start_agent_task(format!("Resume task {}", task_id));
+        }
+
         while self.running {
             // Handle events
             tokio::select! {
@@ -210,6 +240,25 @@ impl SimpleTui {
 
     /// Handle keyboard events
     async fn handle_key_event(&mut self, key: KeyEvent) {
+        // Handle pending interactive approval first
+        if let Some(pending) = self.pending_approval.take() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let _ = pending.tx.send(true);
+                    self.add_entry(ConversationEntry::System(format!("Tool '{}' approved.", pending.tool_name)));
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    let _ = pending.tx.send(false);
+                    self.add_entry(ConversationEntry::System(format!("Tool '{}' rejected.", pending.tool_name)));
+                }
+                _ => {
+                    // Put it back if any other key is pressed
+                    self.pending_approval = Some(pending);
+                }
+            }
+            return;
+        }
+
         // Global exit shortcut
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.running = false;
@@ -489,6 +538,7 @@ impl SimpleTui {
         self.start_time = Some(std::time::Instant::now());
         self.elapsed_seconds = 0;
         self.token_used = 3000 + (task.len() / 4) as u32;
+        self.has_exact_tokens = false;
 
         self.add_entry(ConversationEntry::System(format!(
             "Starting task: {}",
@@ -518,9 +568,34 @@ impl SimpleTui {
                 }
             };
 
+            struct TuiApprovalHandler {
+                tx: tokio::sync::mpsc::UnboundedSender<AgentUpdate>,
+            }
+            #[async_trait::async_trait]
+            impl forge_core::event_loop::ApprovalHandler for TuiApprovalHandler {
+                async fn approve_tool(&self, name: &str, details: &str) -> bool {
+                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<bool>();
+                    let _ = self.tx.send(AgentUpdate::ApprovalRequired {
+                        tool_name: name.to_string(),
+                        details: details.to_string(),
+                        tx: resp_tx,
+                    });
+                    resp_rx.await.unwrap_or(false)
+                }
+            }
+
+            let approval_handler = std::sync::Arc::new(TuiApprovalHandler {
+                tx: tx_clone.clone(),
+            });
+
             let mut event_loop =
                 forge_core::event_loop::EventLoop::new(provider, context, sandbox, task_clone)
-                    .with_mcp_server();
+                    .with_mcp_server()
+                    .with_approval_handler(approval_handler)
+                    .with_tool_policy(forge_core::event_loop::ToolPolicy {
+                        allow_writes: false,
+                        allow_commands: false,
+                    });
 
             // Forward live loop events into the TUI update channel so the
             // conversation panel can show tool calls, output, and diffs as
@@ -589,6 +664,15 @@ impl SimpleTui {
                     self.handle_loop_event(event);
                     received = true;
                 }
+                Ok(AgentUpdate::ApprovalRequired { tool_name, details, tx }) => {
+                    self.pending_approval = Some(PendingApproval {
+                        tool_name,
+                        details,
+                        tx,
+                    });
+                    self.focus = Focus::Input;
+                    return;
+                }
                 Ok(AgentUpdate::Done { steps }) => {
                     self.add_entry(ConversationEntry::System(format!(
                         "Task complete in {} steps",
@@ -627,9 +711,20 @@ impl SimpleTui {
     fn handle_loop_event(&mut self, event: forge_core::LoopEvent) {
         use forge_core::LoopEvent;
         match event {
+            LoopEvent::AssistantMessageChunk { delta } => {
+                if !self.did_stream_chunk {
+                    self.did_stream_chunk = true;
+                    self.conversation.push(ConversationEntry::Assistant(String::new()));
+                }
+                self.stream_queue.extend(delta.chars());
+            }
             LoopEvent::AssistantMessage { content, .. } => {
-                self.conversation.push(ConversationEntry::Assistant(String::new()));
-                self.stream_queue.extend(content.chars());
+                if self.did_stream_chunk {
+                    self.did_stream_chunk = false;
+                } else {
+                    self.conversation.push(ConversationEntry::Assistant(String::new()));
+                    self.stream_queue.extend(content.chars());
+                }
             }
             LoopEvent::ToolStarted { name } => {
                 self.tool_calls_count += 1;
@@ -676,6 +771,7 @@ impl SimpleTui {
             }
             LoopEvent::TokensUsed { total, .. } => {
                 self.token_used = total;
+                self.has_exact_tokens = true;
             }
         }
     }
@@ -726,6 +822,9 @@ impl SimpleTui {
     }
 
     fn update_token_count(&mut self) {
+        if self.has_exact_tokens {
+            return;
+        }
         let mut conv_chars = 0;
         for entry in &self.conversation {
             match entry {
@@ -1162,35 +1261,53 @@ impl SimpleTui {
         }
 
         // 3. Render Input Box
-        let input_border_style = if self.focus == Focus::Input {
-            if self.plan_mode {
-                Style::default().fg(Color::Yellow)
+        if let Some(pending) = &self.pending_approval {
+            let details_display = truncate_for_display(&pending.details, size.width.saturating_sub(65) as usize);
+            let prompt_text = format!(
+                " Agent wants to run: {} ({})? Press [y] to Approve, [n] to Reject",
+                pending.tool_name,
+                details_display
+            );
+            let prompt_paragraph = Paragraph::new(prompt_text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                        .title("⚠️  Interactive Tool Approval Required"),
+                )
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            f.render_widget(prompt_paragraph, left_chunks[2]);
+        } else {
+            let input_border_style = if self.focus == Focus::Input {
+                if self.plan_mode {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(self.theme_border(true))
+                }
             } else {
-                Style::default().fg(self.theme_border(true))
+                Style::default().fg(self.theme_border(false))
+            };
+            let input_title = if self.plan_mode {
+                "Input [Plan Mode] (Enter queues)"
+            } else if self.agent_running {
+                "Input (busy: Enter queues, Ctrl-C quits)"
+            } else if self.focus == Focus::Input {
+                "Input [Enter: send, Tab: navigate]"
+            } else {
+                "Input"
+            };
+            let input_paragraph = Paragraph::new(self.input.as_str())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(input_border_style)
+                        .title(input_title),
+                )
+                .style(default_style);
+            f.render_widget(input_paragraph, left_chunks[2]);
+            if self.focus == Focus::Input && !self.agent_running {
+                f.set_cursor(left_chunks[2].x + self.cursor as u16 + 1, left_chunks[2].y + 1);
             }
-        } else {
-            Style::default().fg(self.theme_border(false))
-        };
-        let input_title = if self.plan_mode {
-            "Input [Plan Mode] (Enter queues)"
-        } else if self.agent_running {
-            "Input (busy: Enter queues, Ctrl-C quits)"
-        } else if self.focus == Focus::Input {
-            "Input [Enter: send, Tab: navigate]"
-        } else {
-            "Input"
-        };
-        let input_paragraph = Paragraph::new(self.input.as_str())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(input_border_style)
-                    .title(input_title),
-            )
-            .style(default_style);
-        f.render_widget(input_paragraph, left_chunks[2]);
-        if self.focus == Focus::Input && !self.agent_running {
-            f.set_cursor(left_chunks[2].x + self.cursor as u16 + 1, left_chunks[2].y + 1);
         }
 
         // 5. Render Status Bar
@@ -1528,6 +1645,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_real_streaming() {
+        let mut tui = test_tui();
+        use forge_core::LoopEvent;
+        
+        tui.handle_loop_event(LoopEvent::AssistantMessageChunk {
+            delta: "hello ".to_string(),
+        });
+        
+        assert_eq!(tui.conversation.len(), 1);
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert!(text.is_empty());
+        } else {
+            panic!("Expected Assistant entry");
+        }
+        assert!(tui.did_stream_chunk);
+
+        tui.handle_loop_event(LoopEvent::AssistantMessageChunk {
+            delta: "world".to_string(),
+        });
+
+        assert_eq!(tui.conversation.len(), 1);
+
+        tui.poll_agent_updates().await;
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert_eq!(text, "hello wo");
+        } else {
+            panic!("Expected Assistant entry");
+        }
+
+        tui.poll_agent_updates().await;
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert_eq!(text, "hello world");
+        } else {
+            panic!("Expected Assistant entry");
+        }
+
+        tui.handle_loop_event(LoopEvent::AssistantMessage {
+            step: 0,
+            content: "hello world".to_string(),
+        });
+
+        assert!(!tui.did_stream_chunk);
+        assert_eq!(tui.conversation.len(), 1);
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert_eq!(text, "hello world");
+        } else {
+            panic!("Expected Assistant entry");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_interactive_approval_y_key() {
+        let mut tui = test_tui();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        
+        tui.agent_rx = Some({
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = event_tx.send(AgentUpdate::ApprovalRequired {
+                tool_name: "write_file".to_string(),
+                details: "write approved.txt".to_string(),
+                tx,
+            });
+            event_rx
+        });
+
+        tui.poll_agent_updates().await;
+        
+        assert!(tui.pending_approval.is_some());
+        
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
+            .await;
+            
+        assert!(tui.pending_approval.is_none());
+        
+        let approved = rx.await.unwrap();
+        assert!(approved);
+    }
+
+    #[tokio::test]
+    async fn test_interactive_approval_n_key() {
+        let mut tui = test_tui();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        
+        tui.agent_rx = Some({
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = event_tx.send(AgentUpdate::ApprovalRequired {
+                tool_name: "write_file".to_string(),
+                details: "write rejected.txt".to_string(),
+                tx,
+            });
+            event_rx
+        });
+
+        tui.poll_agent_updates().await;
+        
+        assert!(tui.pending_approval.is_some());
+        
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()))
+            .await;
+            
+        assert!(tui.pending_approval.is_none());
+        
+        let approved = rx.await.unwrap();
+        assert!(!approved);
+    }
+
+    #[tokio::test]
     async fn test_autocomplete_enter_and_tab() {
         let mut tui = test_tui();
         tui.input = "/pl".to_string();
@@ -1583,5 +1807,32 @@ mod tests {
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
         assert_eq!(tui.queued_messages, vec!["normal prompt".to_string()]); // queued!
+    }
+
+    #[tokio::test]
+    async fn test_token_count_not_overwritten() {
+        let mut tui = test_tui();
+        tui.conversation.push(ConversationEntry::User("short message".to_string()));
+        
+        // Before exact token count is received, update_token_count estimates it
+        tui.update_token_count();
+        assert!(tui.token_used > 3000); // 3000 base + estimate
+        
+        // Receive exact token count
+        tui.handle_loop_event(forge_core::LoopEvent::TokensUsed {
+            prompt: 100,
+            completion: 50,
+            total: 150,
+        });
+        assert_eq!(tui.token_used, 150);
+        assert!(tui.has_exact_tokens);
+
+        // Submitting/updating conv should not overwrite
+        tui.update_token_count();
+        assert_eq!(tui.token_used, 150); // Kept!
+        
+        // Starting a new task should reset it
+        tui.start_agent_task("new task".to_string());
+        assert!(!tui.has_exact_tokens);
     }
 }

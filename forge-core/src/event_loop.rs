@@ -335,6 +335,8 @@ const DEFAULT_MAX_STEPS: usize = 200;
 pub enum LoopEvent {
     /// The assistant produced a (possibly empty) text message this step.
     AssistantMessage { step: usize, content: String },
+    /// A chunk of assistant message from real-time provider streaming.
+    AssistantMessageChunk { delta: String },
     /// A tool is about to run.
     ToolStarted { name: String },
     /// A tool finished; `result` is the rendered output or error text.
@@ -380,6 +382,12 @@ impl Default for ToolPolicy {
     }
 }
 
+/// Interactive tool approval handler
+#[async_trait::async_trait]
+pub trait ApprovalHandler: Send + Sync {
+    async fn approve_tool(&self, name: &str, details: &str) -> bool;
+}
+
 /// Core event loop: observe -> think -> act
 pub struct EventLoop<P: ModelProvider> {
     provider: P,
@@ -398,6 +406,7 @@ pub struct EventLoop<P: ModelProvider> {
     /// Optional observer for live progress events (e.g. the TUI).
     observer: Option<LoopEventSender>,
     tool_policy: ToolPolicy,
+    approval_handler: Option<Arc<dyn ApprovalHandler>>,
 }
 
 impl<P: ModelProvider> EventLoop<P> {
@@ -418,6 +427,7 @@ impl<P: ModelProvider> EventLoop<P> {
             mcp_server: None,
             observer: None,
             tool_policy: ToolPolicy::default(),
+            approval_handler: None,
         }
     }
 
@@ -447,6 +457,12 @@ impl<P: ModelProvider> EventLoop<P> {
     /// Set approval policy for write/edit/run tools.
     pub fn with_tool_policy(mut self, tool_policy: ToolPolicy) -> Self {
         self.tool_policy = tool_policy;
+        self
+    }
+
+    /// Set approval handler for interactive confirmations.
+    pub fn with_approval_handler(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
+        self.approval_handler = Some(handler);
         self
     }
 
@@ -590,7 +606,71 @@ impl<P: ModelProvider> EventLoop<P> {
                 break;
             }
 
-            let response = self.provider.chat(&self.history).await?;
+            let response = if self.provider.supports_streaming() {
+                let mut stream = self.provider.chat_stream(&self.history).await?;
+                let mut accumulated_content = String::new();
+                
+                struct ToolCallAccumulator {
+                    id: String,
+                    name: String,
+                    arguments: String,
+                }
+                let mut tool_calls_accum: Vec<ToolCallAccumulator> = Vec::new();
+                let mut final_usage = None;
+
+                use provider::StreamEvent;
+                while let Some(event) = stream.recv().await {
+                    match event {
+                        StreamEvent::Delta { content } => {
+                            accumulated_content.push_str(&content);
+                            self.emit(LoopEvent::AssistantMessageChunk { delta: content });
+                        }
+                        StreamEvent::ToolCallStart { id, name } => {
+                            tool_calls_accum.push(ToolCallAccumulator {
+                                id,
+                                name,
+                                arguments: String::new(),
+                            });
+                        }
+                        StreamEvent::ToolCallArgument { id, argument } => {
+                            if let Some(tc) = tool_calls_accum.iter_mut().find(|t| t.id == id) {
+                                tc.arguments.push_str(&argument);
+                            } else {
+                                tool_calls_accum.push(ToolCallAccumulator {
+                                    id: id.clone(),
+                                    name: String::new(),
+                                    arguments: argument,
+                                });
+                            }
+                        }
+                        StreamEvent::ToolCallEnd { id: _ } => {}
+                        StreamEvent::Done { usage } => {
+                            final_usage = usage;
+                        }
+                        StreamEvent::Error { message } => {
+                            return Err(anyhow::anyhow!("Streaming error: {}", message));
+                        }
+                    }
+                }
+
+                let tool_calls = tool_calls_accum
+                    .into_iter()
+                    .map(|tc| ToolCall {
+                        id: tc.id,
+                        name: tc.name,
+                        arguments: serde_json::from_str(&tc.arguments).unwrap_or_default(),
+                    })
+                    .collect();
+
+                provider::ChatResponse {
+                    content: accumulated_content,
+                    tool_calls,
+                    usage: final_usage,
+                }
+            } else {
+                self.provider.chat(&self.history).await?
+            };
+
             self.history
                 .push(Message::assistant(response.content.clone()));
             self.steps += 1;
@@ -749,19 +829,56 @@ impl<P: ModelProvider> EventLoop<P> {
 
         match tool_call.name.as_str() {
             "read_file" => self.tool_read_file(tool_call).await,
-            "write_file" => self.tool_write_file(tool_call).await,
-            "run_command" => {
-                if !self.tool_policy.allow_commands {
-                    return Err(anyhow::anyhow!(
-                        "run_command requires approval in this session. Use /approve session to allow command execution."
-                    ));
+            "write_file" => {
+                let path: String = tool_call.get_arg("path")?;
+                if !self.tool_policy.allow_writes {
+                    let approved = if let Some(handler) = &self.approval_handler {
+                        handler.approve_tool("write_file", &path).await
+                    } else {
+                        false
+                    };
+                    if !approved {
+                        return Err(anyhow::anyhow!(
+                            "write_file requires approval in this session. Use /approve session to allow file edits."
+                        ));
+                    }
                 }
+                self.tool_write_file(tool_call).await
+            }
+            "run_command" => {
                 let command: String = tool_call.get_arg("command")?;
+                if !self.tool_policy.allow_commands {
+                    let approved = if let Some(handler) = &self.approval_handler {
+                        handler.approve_tool("run_command", &command).await
+                    } else {
+                        false
+                    };
+                    if !approved {
+                        return Err(anyhow::anyhow!(
+                            "run_command requires approval in this session. Use /approve session to allow command execution."
+                        ));
+                    }
+                }
                 let output = self.sandbox.run_command(&command).await?;
                 debug!("Command output: {}", output);
                 Ok(format!("Command output:\n{}", output))
             }
-            "diff_edit" => self.tool_diff_edit(tool_call).await,
+            "diff_edit" => {
+                let path: String = tool_call.get_arg("path")?;
+                if !self.tool_policy.allow_writes {
+                    let approved = if let Some(handler) = &self.approval_handler {
+                        handler.approve_tool("diff_edit", &path).await
+                    } else {
+                        false
+                    };
+                    if !approved {
+                        return Err(anyhow::anyhow!(
+                            "diff_edit requires approval in this session. Use /approve session to allow file edits."
+                        ));
+                    }
+                }
+                self.tool_diff_edit(tool_call).await
+            }
             _ => {
                 if let Some(client) = &self.mcp_client {
                     let tool_name = tool_call.name.clone();
@@ -785,11 +902,6 @@ impl<P: ModelProvider> EventLoop<P> {
     }
 
     async fn tool_write_file(&self, tool_call: ToolCall) -> Result<String> {
-        if !self.tool_policy.allow_writes {
-            return Err(anyhow::anyhow!(
-                "write_file requires approval in this session. Use /approve session to allow file edits."
-            ));
-        }
         let path: String = tool_call.get_arg("path")?;
         let content: String = tool_call.get_arg("content")?;
         self.sandbox.write_file(&path, &content).await?;
@@ -802,11 +914,6 @@ impl<P: ModelProvider> EventLoop<P> {
     }
 
     async fn tool_diff_edit(&mut self, tool_call: ToolCall) -> Result<String> {
-        if !self.tool_policy.allow_writes {
-            return Err(anyhow::anyhow!(
-                "diff_edit requires approval in this session. Use /approve session to allow file edits."
-            ));
-        }
         let path: String = tool_call.get_arg("path")?;
         let old_text: String = tool_call.get_arg("old_text")?;
         let new_text: String = tool_call.get_arg("new_text")?;
@@ -1117,6 +1224,74 @@ mod tests {
 
         assert!(result.unwrap_err().to_string().contains("approval"));
         assert!(!temp_dir.path().join("blocked.txt").exists());
+    }
+
+    struct MockApprovalHandler {
+        approve: bool,
+    }
+    #[async_trait::async_trait]
+    impl ApprovalHandler for MockApprovalHandler {
+        async fn approve_tool(&self, _name: &str, _details: &str) -> bool {
+            self.approve
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_policy_interactive_approval_accept() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let provider = MockProvider::new(vec![]);
+        let context = ContextEngine::new(temp_dir.path()).unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+        let handler = Arc::new(MockApprovalHandler { approve: true });
+        let mut event_loop = EventLoop::new(provider, context, sandbox, "write output".to_string())
+            .with_tool_policy(ToolPolicy {
+                allow_writes: false,
+                allow_commands: true,
+            })
+            .with_approval_handler(handler);
+
+        let result = event_loop
+            .execute_tool_with_result(tool_call(
+                "write_file",
+                arg_map(&[
+                    ("path", serde_json::json!("approved.txt")),
+                    ("content", serde_json::json!("approved content")),
+                ]),
+            ))
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Successfully wrote 16 bytes to approved.txt");
+        assert!(temp_dir.path().join("approved.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn test_tool_policy_interactive_approval_reject() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let provider = MockProvider::new(vec![]);
+        let context = ContextEngine::new(temp_dir.path()).unwrap();
+        let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
+        let handler = Arc::new(MockApprovalHandler { approve: false });
+        let mut event_loop = EventLoop::new(provider, context, sandbox, "write output".to_string())
+            .with_tool_policy(ToolPolicy {
+                allow_writes: false,
+                allow_commands: true,
+            })
+            .with_approval_handler(handler);
+
+        let result = event_loop
+            .execute_tool_with_result(tool_call(
+                "write_file",
+                arg_map(&[
+                    ("path", serde_json::json!("rejected.txt")),
+                    ("content", serde_json::json!("rejected content")),
+                ]),
+            ))
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires approval"));
+        assert!(!temp_dir.path().join("rejected.txt").exists());
     }
 
     #[tokio::test]

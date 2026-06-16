@@ -174,6 +174,13 @@ impl ModelProvider for OpenAIProvider {
     fn supports_streaming(&self) -> bool {
         true
     }
+
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+    ) -> Result<mpsc::Receiver<StreamEvent>> {
+        StreamingProvider::chat_stream(self, messages).await
+    }
 }
 
 #[async_trait]
