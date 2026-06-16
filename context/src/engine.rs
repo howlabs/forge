@@ -105,7 +105,7 @@ impl ContextEngine {
             "text-embedding-3-small".to_string(),
             1536,
         ));
-        
+
         let vector_store = VectorStore::open(&store_dir, 1536, "text-embedding-3-small")?;
         let graph_path = store_dir.join("graph.json");
         let graph = KnowledgeGraph::load(&graph_path).unwrap_or_else(|_| KnowledgeGraph::new());
@@ -208,12 +208,10 @@ impl ContextEngine {
         // 3. RRF merge
         let mut rrf_scores: HashMap<u64, f32> = HashMap::new();
         for (rank, (id, _)) in vector_hits.iter().enumerate() {
-            *rrf_scores.entry(*id).or_insert(0.0) +=
-                retrieval::rrf_score(rank, config.rrf_k);
+            *rrf_scores.entry(*id).or_insert(0.0) += retrieval::rrf_score(rank, config.rrf_k);
         }
         for (rank, (id, _)) in bm25_hits.iter().enumerate() {
-            *rrf_scores.entry(*id).or_insert(0.0) +=
-                retrieval::rrf_score(rank, config.rrf_k);
+            *rrf_scores.entry(*id).or_insert(0.0) += retrieval::rrf_score(rank, config.rrf_k);
         }
 
         // 4. Graph boost: match query tokens to symbol names
@@ -231,12 +229,8 @@ impl ContextEngine {
             .iter()
             .filter_map(|&(id, rrf)| {
                 let chunk = self.vector_store.get(id)?;
-                let gb = retrieval::graph_boost(
-                    id,
-                    &query_sym_ids,
-                    &self.graph,
-                    &self.chunk_symbols,
-                );
+                let gb =
+                    retrieval::graph_boost(id, &query_sym_ids, &self.graph, &self.chunk_symbols);
                 let lex = retrieval::lexical_score(&query_terms, &chunk.text);
                 let vs = vector_hits
                     .iter()
@@ -279,18 +273,14 @@ impl ContextEngine {
 
     /// Statistics: `(file_count, symbol_count, chunk_count)`.
     pub fn stats(&self) -> (usize, usize, usize) {
-        (
-            self.file_count,
-            self.symbol_count,
-            self.vector_store.len(),
-        )
+        (self.file_count, self.symbol_count, self.vector_store.len())
     }
 }
 
 impl crate::ContextIndex for ContextEngine {
     fn upsert_file(&mut self, path: &Path, src: &str) {
         self.remove_file(path);
-        
+
         let registry = LanguageRegistry::new();
         if let Err(e) = self.index_file(path, src, &registry) {
             tracing::warn!("engine: failed to upsert {}: {:#}", path.display(), e);
@@ -305,7 +295,7 @@ impl crate::ContextIndex for ContextEngine {
         self.graph.remove_file(path);
         self.vector_store.remove_file(path);
         // ponytail: YAGNI - chunk_symbols might leak slightly for deleted chunks, but harmless for short-lived daemon
-        
+
         if self.file_count > 0 {
             self.file_count -= 1;
         }
@@ -414,12 +404,12 @@ impl ContextEngine {
                 let start_line = i * 40 + 1;
                 let end_line = start_line + window.len() - 1;
                 let text = window.join("\n");
-                
+
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&path, &mut hasher);
                 std::hash::Hash::hash(&start_line, &mut hasher);
                 let id = std::hash::Hasher::finish(&hasher);
-                
+
                 chunks.push(Chunk {
                     id,
                     file: path.to_path_buf(),
@@ -439,7 +429,7 @@ impl ContextEngine {
                     std::hash::Hash::hash(&path, &mut hasher);
                     std::hash::Hash::hash(&sym.start_line, &mut hasher);
                     let id = std::hash::Hasher::finish(&hasher);
-                    
+
                     Chunk {
                         id,
                         file: path.to_path_buf(),
@@ -451,8 +441,6 @@ impl ContextEngine {
                 .collect()
         }
     }
-
-
 
     /// Collect all symbol names reachable via the knowledge graph from any
     /// symbol whose range overlaps the chunk.

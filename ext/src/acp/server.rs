@@ -9,7 +9,9 @@ use tokio::sync::RwLock;
 
 /// Chat handler function type
 pub type ChatHandler = Arc<
-    dyn Fn(Vec<ChatMessage>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>
+    dyn Fn(
+            Vec<ChatMessage>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>
         + Send
         + Sync,
 >;
@@ -93,13 +95,20 @@ impl AcpServer {
 
     /// Chat with the model via the configured handler
     pub async fn chat_with_model(&self, messages: &[ChatMessage]) -> Result<String> {
-        let handler = self.chat_handler.as_ref()
+        let handler = self
+            .chat_handler
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No chat handler configured"))?;
         (handler)(messages.to_vec()).await
     }
 
     /// Read a file from the filesystem
-    pub fn read_file_content(&self, file_path: &str, line_start: Option<u32>, line_end: Option<u32>) -> Result<String> {
+    pub fn read_file_content(
+        &self,
+        file_path: &str,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+    ) -> Result<String> {
         let root = self.root_path.as_deref().unwrap_or(".");
         let full_path = Path::new(root).join(file_path);
 
@@ -131,7 +140,12 @@ impl AcpServer {
             .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", file_path, e))?;
 
         if let Some(pos) = content.find(old_text) {
-            let new_content = format!("{}{}{}", &content[..pos], new_text, &content[pos + old_text.len()..]);
+            let new_content = format!(
+                "{}{}{}",
+                &content[..pos],
+                new_text,
+                &content[pos + old_text.len()..]
+            );
             std::fs::write(&full_path, new_content)
                 .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", file_path, e))?;
             Ok(true)
@@ -169,7 +183,11 @@ impl AcpServer {
                             let trimmed = line.trim();
                             if trimmed.starts_with("// TODO") || trimmed.starts_with("// FIXME") {
                                 diagnostics.push(Diagnostic {
-                                    file_path: path.strip_prefix(root_path).unwrap_or(&path).to_string_lossy().to_string(),
+                                    file_path: path
+                                        .strip_prefix(root_path)
+                                        .unwrap_or(&path)
+                                        .to_string_lossy()
+                                        .to_string(),
                                     line: (i + 1) as u32,
                                     column: 0,
                                     message: trimmed.to_string(),
@@ -178,7 +196,11 @@ impl AcpServer {
                             }
                             if trimmed.contains("unwrap()") && !trimmed.starts_with("//") {
                                 diagnostics.push(Diagnostic {
-                                    file_path: path.strip_prefix(root_path).unwrap_or(&path).to_string_lossy().to_string(),
+                                    file_path: path
+                                        .strip_prefix(root_path)
+                                        .unwrap_or(&path)
+                                        .to_string_lossy()
+                                        .to_string(),
                                     line: (i + 1) as u32,
                                     column: line.find("unwrap()").unwrap_or(0) as u32,
                                     message: "Consider using proper error handling".into(),
@@ -246,8 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_acp_server_read_file() {
-        let server = AcpServer::new("forge", "0.100.0")
-            .with_root_path(".");
+        let server = AcpServer::new("forge", "0.100.0").with_root_path(".");
         let content = server.read_file_content("Cargo.toml", None, None).unwrap();
         assert!(content.contains("[package]"));
     }

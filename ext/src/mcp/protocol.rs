@@ -38,19 +38,46 @@ pub struct JsonRpcError {
 
 impl JsonRpcError {
     pub fn parse_error() -> Self {
-        Self { code: -32700, message: "Parse error".into(), data: None }
+        Self {
+            code: -32700,
+            message: "Parse error".into(),
+            data: None,
+        }
+    }
+    pub fn parse_error_with(msg: &str) -> Self {
+        Self {
+            code: -32700,
+            message: format!("Parse error: {}", msg),
+            data: None,
+        }
     }
     pub fn invalid_request() -> Self {
-        Self { code: -32600, message: "Invalid Request".into(), data: None }
+        Self {
+            code: -32600,
+            message: "Invalid Request".into(),
+            data: None,
+        }
     }
     pub fn method_not_found(method: &str) -> Self {
-        Self { code: -32601, message: format!("Method not found: {}", method), data: None }
+        Self {
+            code: -32601,
+            message: format!("Method not found: {}", method),
+            data: None,
+        }
     }
     pub fn invalid_params(msg: &str) -> Self {
-        Self { code: -32602, message: msg.into(), data: None }
+        Self {
+            code: -32602,
+            message: msg.into(),
+            data: None,
+        }
     }
     pub fn internal_error(msg: &str) -> Self {
-        Self { code: -32603, message: msg.into(), data: None }
+        Self {
+            code: -32603,
+            message: msg.into(),
+            data: None,
+        }
     }
 }
 
@@ -65,7 +92,11 @@ pub struct JsonRpcNotification {
 
 impl JsonRpcNotification {
     pub fn new(method: &str, params: Option<serde_json::Value>) -> Self {
-        Self { jsonrpc: "2.0".into(), method: method.into(), params }
+        Self {
+            jsonrpc: "2.0".into(),
+            method: method.into(),
+            params,
+        }
     }
 }
 
@@ -506,11 +537,16 @@ mod tests {
 
     #[test]
     fn test_content_variants() {
-        let text = Content::Text { text: "hello".into() };
+        let text = Content::Text {
+            text: "hello".into(),
+        };
         let json = serde_json::to_string(&text).unwrap();
         assert!(json.contains("\"text\""));
 
-        let img = Content::Image { data: "base64data".into(), mime_type: "image/png".into() };
+        let img = Content::Image {
+            data: "base64data".into(),
+            mime_type: "image/png".into(),
+        };
         let json = serde_json::to_string(&img).unwrap();
         assert!(json.contains("\"image\""));
     }
@@ -518,8 +554,13 @@ mod tests {
     #[test]
     fn test_server_capabilities_serialization() {
         let caps = ServerCapabilities {
-            tools: Some(ToolsCapability { list_changed: Some(true) }),
-            resources: Some(ResourcesCapability { subscribe: Some(true), list_changed: None }),
+            tools: Some(ToolsCapability {
+                list_changed: Some(true),
+            }),
+            resources: Some(ResourcesCapability {
+                subscribe: Some(true),
+                list_changed: None,
+            }),
             prompts: None,
             logging: Some(LoggingCapability {}),
             sampling: None,
@@ -535,7 +576,10 @@ mod tests {
         let result = InitializeResult {
             protocol_version: "2024-11-05".into(),
             capabilities: ServerCapabilities::default(),
-            server_info: Implementation { name: "forge".into(), version: "0.100.0".into() },
+            server_info: Implementation {
+                name: "forge".into(),
+                version: "0.100.0".into(),
+            },
             instructions: Some("I am Forge".into()),
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -547,7 +591,9 @@ mod tests {
     fn test_prompt_message_serialization() {
         let msg = PromptMessage {
             role: Role::User,
-            content: Content::Text { text: "hello".into() },
+            content: Content::Text {
+                text: "hello".into(),
+            },
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"user\""));
@@ -563,7 +609,9 @@ mod tests {
     fn test_sampling_message_roundtrip() {
         let msg = SamplingMessage {
             role: Role::Assistant,
-            content: Content::Text { text: "response".into() },
+            content: Content::Text {
+                text: "response".into(),
+            },
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: SamplingMessage = serde_json::from_str(&json).unwrap();
@@ -577,7 +625,10 @@ mod tests {
             progress: 50,
             total: Some(100),
         };
-        let n = JsonRpcNotification::new(NOTIFICATION_PROGRESS, Some(serde_json::to_value(params).unwrap()));
+        let n = JsonRpcNotification::new(
+            NOTIFICATION_PROGRESS,
+            Some(serde_json::to_value(params).unwrap()),
+        );
         let json = serde_json::to_string(&n).unwrap();
         assert!(json.contains("progress"));
     }

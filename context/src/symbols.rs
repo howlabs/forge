@@ -138,7 +138,7 @@ pub fn parse_symbols(
                 if capture.node.is_error() {
                     break;
                 }
-                
+
                 if let Some(sym) = build_symbol(path, source, language, capture.node) {
                     out.push(sym);
                 }
@@ -225,7 +225,9 @@ fn classify(language: Lang, node: Node, source: &str) -> Option<(SymbolKind, Str
                 Some((SymbolKind::Struct, child_text(node, "name", source)))
             }
             "enum_declaration" => Some((SymbolKind::Enum, child_text(node, "name", source))),
-            "interface_declaration" => Some((SymbolKind::Interface, child_text(node, "name", source))),
+            "interface_declaration" => {
+                Some((SymbolKind::Interface, child_text(node, "name", source)))
+            }
             "module" => Some((SymbolKind::Module, child_text(node, "name", source))),
             "namespace_declaration" => {
                 Some((SymbolKind::Namespace, child_text(node, "name", source)))
@@ -258,7 +260,9 @@ fn classify(language: Lang, node: Node, source: &str) -> Option<(SymbolKind, Str
         },
         Lang::Java => match kind {
             "class_declaration" => Some((SymbolKind::Struct, child_text(node, "name", source))),
-            "interface_declaration" => Some((SymbolKind::Interface, child_text(node, "name", source))),
+            "interface_declaration" => {
+                Some((SymbolKind::Interface, child_text(node, "name", source)))
+            }
             "enum_declaration" => Some((SymbolKind::Enum, child_text(node, "name", source))),
             "method_declaration" | "constructor_declaration" => {
                 Some((SymbolKind::Function, child_text(node, "name", source)))
@@ -494,11 +498,19 @@ mod tests {
         let src = "package main\n\ntype Handler interface {\n\tServeHTTP()\n}\n\ntype Server struct {\n\tport int\n}\n\nfunc (s *Server) ServeHTTP() {}\n\nconst Version = \"1.0.0\"\n";
         let path = PathBuf::from("main.go");
         let syms = parse_symbols(&path, src, &registry()).expect("parses");
-        
-        assert!(syms.iter().any(|s| s.name == "Handler" && s.kind == SymbolKind::Interface));
-        assert!(syms.iter().any(|s| s.name == "Server" && s.kind == SymbolKind::Struct));
-        assert!(syms.iter().any(|s| s.name == "ServeHTTP" && s.kind == SymbolKind::Function));
-        assert!(syms.iter().any(|s| s.name == "Version" && s.kind == SymbolKind::Const));
+
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Handler" && s.kind == SymbolKind::Interface));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Server" && s.kind == SymbolKind::Struct));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "ServeHTTP" && s.kind == SymbolKind::Function));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Version" && s.kind == SymbolKind::Const));
     }
 
     #[test]
@@ -506,12 +518,22 @@ mod tests {
         let src = "package com.example;\n\npublic interface Runnable { void run(); }\n\npublic class App implements Runnable {\n    public enum Status { OK, ERROR }\n    public App() {}\n    public void run() {}\n}\n";
         let path = PathBuf::from("App.java");
         let syms = parse_symbols(&path, src, &registry()).expect("parses");
-        
-        assert!(syms.iter().any(|s| s.name == "Runnable" && s.kind == SymbolKind::Interface));
-        assert!(syms.iter().any(|s| s.name == "App" && s.kind == SymbolKind::Struct));
-        assert!(syms.iter().any(|s| s.name == "Status" && s.kind == SymbolKind::Enum));
-        assert!(syms.iter().any(|s| s.name == "App" && s.kind == SymbolKind::Function)); // Constructor
-        assert!(syms.iter().any(|s| s.name == "run" && s.kind == SymbolKind::Function));
+
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Runnable" && s.kind == SymbolKind::Interface));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "App" && s.kind == SymbolKind::Struct));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Status" && s.kind == SymbolKind::Enum));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "App" && s.kind == SymbolKind::Function)); // Constructor
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "run" && s.kind == SymbolKind::Function));
     }
 
     #[test]
@@ -519,11 +541,21 @@ mod tests {
         let src = "namespace math {\n    class Vector {};\n    struct Point { int x, y; };\n    enum Color { RED, BLUE };\n    void draw(Point p) {}\n}\n";
         let path = PathBuf::from("math.cpp");
         let syms = parse_symbols(&path, src, &registry()).expect("parses");
-        
-        assert!(syms.iter().any(|s| s.name == "math" && s.kind == SymbolKind::Namespace));
-        assert!(syms.iter().any(|s| s.name == "Vector" && s.kind == SymbolKind::Struct));
-        assert!(syms.iter().any(|s| s.name == "Point" && s.kind == SymbolKind::Struct));
-        assert!(syms.iter().any(|s| s.name == "Color" && s.kind == SymbolKind::Enum));
-        assert!(syms.iter().any(|s| s.name == "draw" && s.kind == SymbolKind::Function));
+
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "math" && s.kind == SymbolKind::Namespace));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Vector" && s.kind == SymbolKind::Struct));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Point" && s.kind == SymbolKind::Struct));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Color" && s.kind == SymbolKind::Enum));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "draw" && s.kind == SymbolKind::Function));
     }
 }

@@ -32,7 +32,11 @@ impl Serialize for PluginVersion {
 
 impl PluginVersion {
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -41,9 +45,15 @@ impl PluginVersion {
             return Err(format!("Invalid version format: {}", s));
         }
         Ok(Self {
-            major: parts[0].parse().map_err(|e| format!("Invalid major: {}", e))?,
-            minor: parts[1].parse().map_err(|e| format!("Invalid minor: {}", e))?,
-            patch: parts[2].parse().map_err(|e| format!("Invalid patch: {}", e))?,
+            major: parts[0]
+                .parse()
+                .map_err(|e| format!("Invalid major: {}", e))?,
+            minor: parts[1]
+                .parse()
+                .map_err(|e| format!("Invalid minor: {}", e))?,
+            patch: parts[2]
+                .parse()
+                .map_err(|e| format!("Invalid patch: {}", e))?,
         })
     }
 }
@@ -118,7 +128,8 @@ impl PluginManifest {
     }
 
     pub fn serialize(&self) -> Result<String, String> {
-        toml::to_string_pretty(self).map_err(|e| format!("Failed to serialize plugin manifest: {}", e))
+        toml::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize plugin manifest: {}", e))
     }
 
     pub fn validate(&self) -> Vec<String> {

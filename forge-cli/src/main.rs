@@ -9,7 +9,9 @@ use tracing_subscriber::EnvFilter;
 
 use agents::Orchestrator;
 
+mod doctor;
 mod exec;
+mod mcp;
 
 use exec::{run_exec, ExecConfig};
 
@@ -36,11 +38,12 @@ enum Commands {
         #[arg(short, long, default_value = "forge.toml")]
         config: String,
 
-        /// API key for the model provider
+        /// API key for the model provider. Optional for the `mock`/`local`
+        /// providers and when the provider's env var is set.
         #[arg(short, long)]
-        api_key: String,
+        api_key: Option<String>,
 
-        /// Model provider (anthropic, openai, zai, gemini, local)
+        /// Model provider (anthropic, openai, zai, gemini, local, mock)
         #[arg(long, default_value = "zai")]
         provider: String,
 
@@ -70,8 +73,12 @@ enum Commands {
     },
     /// Headless exec mode for CI/CD
     Exec {
-        /// Task description
-        task: String,
+        /// Task description (positional)
+        task: Option<String>,
+
+        /// Task description (alias for positional task)
+        #[arg(long)]
+        prompt: Option<String>,
 
         /// Path to the project directory
         #[arg(short, long, default_value = ".")]
@@ -81,11 +88,12 @@ enum Commands {
         #[arg(short, long, default_value = "forge.toml")]
         config: String,
 
-        /// API key for the model provider
+        /// API key for the model provider. Optional for the `mock`/`local`
+        /// providers and when the provider's env var is set.
         #[arg(short, long)]
-        api_key: String,
+        api_key: Option<String>,
 
-        /// Model provider (anthropic, openai, zai, gemini, local)
+        /// Model provider (anthropic, openai, zai, gemini, local, mock)
         #[arg(long, default_value = "zai")]
         provider: String,
 
@@ -94,7 +102,7 @@ enum Commands {
         model: String,
 
         /// Run verify loop
-        #[arg(long, default_value_t = true)]
+        #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
         verify: bool,
 
         /// Output format
@@ -109,6 +117,43 @@ enum Commands {
     Agents {
         #[command(subcommand)]
         action: AgentAction,
+    },
+    /// Diagnose the environment: provider keys, git, cargo, sandbox, config
+    Doctor {
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Configuration file path
+        #[arg(short, long, default_value = "forge.toml")]
+        config: String,
+
+        /// Network access mode to report on (off, on, auto)
+        #[arg(short, long, default_value = "off")]
+        network: String,
+
+        /// Emit machine-readable JSON instead of the text report
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Model Context Protocol: run Forge as an MCP stdio server
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpAction {
+    /// Serve Forge's built-in tools over MCP stdio (line-delimited JSON-RPC)
+    Serve {
+        /// Path to the project directory exposed to MCP tools
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+
+        /// Network access mode for sandbox-backed tools (off, on, auto)
+        #[arg(short, long, default_value = "off")]
+        network: String,
     },
 }
 
@@ -182,6 +227,8 @@ async fn main() -> Result<()> {
                 return resume_task(&task_id, &project_path);
             }
 
+            let api_key = resolve_api_key(&provider, api_key)?;
+
             // Provider will be resolved via registry
 
             // Initialize context engine (minimal: AGENTS.md loading)
@@ -191,11 +238,12 @@ async fn main() -> Result<()> {
             let sandbox = Sandbox::new(project_path.clone(), network)?;
 
             let context = std::sync::Arc::new(tokio::sync::Mutex::new(context));
-            
+
             let mut _watcher = None;
             if watch {
                 let mut w = forge_core::file_watcher::FileWatcher::new(
-                    context.clone() as std::sync::Arc<tokio::sync::Mutex<dyn context::ContextIndex>>,
+                    context.clone()
+                        as std::sync::Arc<tokio::sync::Mutex<dyn context::ContextIndex>>,
                     &project_path,
                     500, // debounce
                 )?;
@@ -228,6 +276,7 @@ async fn main() -> Result<()> {
         }
         Commands::Exec {
             task,
+            prompt,
             project_path,
             config,
             api_key,
@@ -235,9 +284,17 @@ async fn main() -> Result<()> {
             model,
             verify,
             format,
-            trace,
+            trace: _,
         } => {
             tracing::info!("Forge v{} starting (exec mode)", env!("CARGO_PKG_VERSION"));
+
+            let api_key = resolve_api_key(&provider, api_key)?;
+
+            let task = task.or(prompt).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing task description. Pass it as a positional argument or via --prompt."
+                )
+            })?;
 
             let exec_config = ExecConfig {
                 task,
@@ -247,8 +304,6 @@ async fn main() -> Result<()> {
                 provider,
                 model,
                 verify,
-                output_format: format.clone(),
-                trace,
             };
 
             let result = run_exec(exec_config).await?;
@@ -304,7 +359,12 @@ async fn main() -> Result<()> {
                         } else {
                             "FAILED"
                         };
-                        println!("[{}] {} — {}", status, t.id, t.result.as_deref().unwrap_or(""));
+                        println!(
+                            "[{}] {} — {}",
+                            status,
+                            t.id,
+                            t.result.as_deref().unwrap_or("")
+                        );
                     }
                     Ok(())
                 }
@@ -312,26 +372,26 @@ async fn main() -> Result<()> {
                     let project_path = std::path::PathBuf::from(&project_path);
                     let worktree_base = project_path.join(".forge").join("worktrees");
 
-                    let orchestrator = agents::MultiAgentOrchestrator::new(
-                        &project_path,
-                        &worktree_base,
-                        4,
-                    )?;
+                    let orchestrator =
+                        agents::MultiAgentOrchestrator::new(&project_path, &worktree_base, 4)?;
 
                     let tasks = orchestrator.list_tasks_from_disk();
                     if tasks.is_empty() {
                         println!("No agents found.");
                     } else {
-                        println!("{:<12} {:<10} {:<40} {}", "ID", "STATUS", "PROMPT", "RESULT");
+                        println!(
+                            "{:<12} {:<10} {:<40} {}",
+                            "ID", "STATUS", "PROMPT", "RESULT"
+                        );
                         println!("{}", "-".repeat(80));
                         for t in &tasks {
                             let status = format!("{:?}", t.status);
-                        let prompt = if t.prompt.chars().count() > 37 {
-                            let truncated: String = t.prompt.chars().take(37).collect();
-                            format!("{truncated}...")
-                        } else {
-                            t.prompt.clone()
-                        };
+                            let prompt = if t.prompt.chars().count() > 37 {
+                                let truncated: String = t.prompt.chars().take(37).collect();
+                                format!("{truncated}...")
+                            } else {
+                                t.prompt.clone()
+                            };
                             let result = t.result.as_deref().unwrap_or("");
                             println!(
                                 "{:<12} {:<10} {:<40} {}",
@@ -348,11 +408,8 @@ async fn main() -> Result<()> {
                     let project_path = std::path::PathBuf::from(&project_path);
                     let worktree_base = project_path.join(".forge").join("worktrees");
 
-                    let orchestrator = agents::MultiAgentOrchestrator::new(
-                        &project_path,
-                        &worktree_base,
-                        4,
-                    )?;
+                    let orchestrator =
+                        agents::MultiAgentOrchestrator::new(&project_path, &worktree_base, 4)?;
 
                     // ponytail: can't resume across processes.  Report
                     // status of persisted tasks.  Merges were already
@@ -369,18 +426,88 @@ async fn main() -> Result<()> {
                             } else {
                                 "RUNNING"
                             };
-                            println!("[{}] {} — {}", status, t.id, t.result.as_deref().unwrap_or("in progress"));
+                            println!(
+                                "[{}] {} — {}",
+                                status,
+                                t.id,
+                                t.result.as_deref().unwrap_or("in progress")
+                            );
                         }
                     }
                     Ok(())
                 }
             }
         }
+        Commands::Doctor {
+            project_path,
+            config,
+            network,
+            json,
+        } => {
+            let exit_code = doctor::run(&doctor::DoctorConfig {
+                project_path,
+                config_path: config,
+                network,
+                json,
+            });
+            std::process::exit(exit_code);
+        }
+        Commands::Mcp { action } => match action {
+            McpAction::Serve {
+                project_path,
+                network,
+            } => {
+                tracing::info!("Starting Forge MCP stdio server");
+                mcp::serve(project_path, network).await
+            }
+        },
     }
 }
 
-pub fn create_provider_instance(name: &str, model: &str, api_key: &str) -> Result<Arc<dyn ModelProvider>> {
+pub fn create_provider_instance(
+    name: &str,
+    model: &str,
+    api_key: &str,
+) -> Result<Arc<dyn ModelProvider>> {
     provider::create_provider(name, model, api_key)
+}
+
+/// Resolve the API key for a provider from, in order: the explicit `--api-key`
+/// flag, the provider's registered environment variable, or an empty string for
+/// providers that need no credentials (`mock`/`local`). Errors when a key is
+/// genuinely required but missing.
+fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> Result<String> {
+    if let Some(key) = explicit.filter(|k| !k.is_empty()) {
+        return Ok(key);
+    }
+
+    let lower = provider_name.to_lowercase();
+    if lower == "mock" || lower == "local" {
+        return Ok(String::new());
+    }
+
+    // Provider-specific env var from the registry, with sensible fallbacks for
+    // the providers that have dedicated constructors.
+    let env_var = provider::find_provider(&lower)
+        .map(|entry| entry.env_var.to_string())
+        .unwrap_or_else(|| match lower.as_str() {
+            "anthropic" => "ANTHROPIC_API_KEY".to_string(),
+            "gemini" => "GEMINI_API_KEY".to_string(),
+            _ => "FORGE_API_KEY".to_string(),
+        });
+
+    if let Ok(key) = std::env::var(&env_var) {
+        if !key.is_empty() {
+            return Ok(key);
+        }
+    }
+
+    anyhow::bail!(
+        "No API key for provider '{}'. Pass --api-key or set {}. \
+         (Use --provider mock for offline runs.)",
+        provider_name,
+        env_var
+    )
 }
 
 /// Launch TUI mode with configured provider
@@ -484,10 +611,15 @@ mod tests {
     #[test]
     fn test_agents_spawn_parsing() {
         let cli = Cli::try_parse_from([
-            "forge", "agents", "spawn",
-            "--prompt", "fix the bug",
-            "--api-key", "test",
-            "--scope", "src/**",
+            "forge",
+            "agents",
+            "spawn",
+            "--prompt",
+            "fix the bug",
+            "--api-key",
+            "test",
+            "--scope",
+            "src/**",
         ]);
         assert!(cli.is_ok());
     }

@@ -470,6 +470,7 @@ dependencies = [
  "atty",
  "clap",
  "context",
+ "ext",
  "forge-core",
  "forge-tui",
  "provider",

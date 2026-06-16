@@ -11,21 +11,31 @@ use tokio::sync::RwLock;
 
 /// Tool handler function type
 pub type ToolHandler = Arc<
-    dyn Fn(String, serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolCallResult>> + Send>>
+    dyn Fn(
+            String,
+            serde_json::Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolCallResult>> + Send>>
         + Send
         + Sync,
 >;
 
 /// Resource provider function type
 pub type ResourceProvider = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<ResourceContents>>> + Send>>
-        + Send
+    dyn Fn(
+            String,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Vec<ResourceContents>>> + Send>,
+        > + Send
         + Sync,
 >;
 
 /// Prompt handler function type
 pub type PromptHandler = Arc<
-    dyn Fn(serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<GetPromptResult>> + Send>>
+    dyn Fn(
+            serde_json::Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<GetPromptResult>> + Send>>
         + Send
         + Sync,
 >;
@@ -48,7 +58,10 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(name: &str, version: &str) -> Self {
         Self {
-            server_info: Implementation { name: name.into(), version: version.into() },
+            server_info: Implementation {
+                name: name.into(),
+                version: version.into(),
+            },
             capabilities: ServerCapabilities::default(),
             tools: HashMap::new(),
             tool_handlers: HashMap::new(),
@@ -64,7 +77,9 @@ impl McpServer {
 
     pub fn with_tools(mut self, enabled: bool) -> Self {
         if enabled {
-            self.capabilities.tools = Some(ToolsCapability { list_changed: Some(true) });
+            self.capabilities.tools = Some(ToolsCapability {
+                list_changed: Some(true),
+            });
         }
         self
     }
@@ -79,7 +94,9 @@ impl McpServer {
 
     pub fn with_prompts(mut self, enabled: bool) -> Self {
         if enabled {
-            self.capabilities.prompts = Some(PromptsCapability { list_changed: Some(true) });
+            self.capabilities.prompts = Some(PromptsCapability {
+                list_changed: Some(true),
+            });
         }
         self
     }
@@ -101,13 +118,26 @@ impl McpServer {
         input_schema: serde_json::Value,
         handler: ToolHandler,
     ) {
-        let tool = McpTool { name: name.clone(), description, input_schema };
+        let tool = McpTool {
+            name: name.clone(),
+            description,
+            input_schema,
+        };
         self.tools.insert(name.clone(), tool);
         self.tool_handlers.insert(name, handler);
     }
 
-    pub fn register_tool_simple(&mut self, name: String, description: String, input_schema: serde_json::Value) {
-        let tool = McpTool { name, description, input_schema };
+    pub fn register_tool_simple(
+        &mut self,
+        name: String,
+        description: String,
+        input_schema: serde_json::Value,
+    ) {
+        let tool = McpTool {
+            name,
+            description,
+            input_schema,
+        };
         self.tools.insert(tool.name.clone(), tool);
     }
 
@@ -117,7 +147,11 @@ impl McpServer {
         self.resources.insert(key, resource);
     }
 
-    pub fn register_resource_template(&mut self, template: ResourceTemplate, provider: ResourceProvider) {
+    pub fn register_resource_template(
+        &mut self,
+        template: ResourceTemplate,
+        provider: ResourceProvider,
+    ) {
         let key = template.uri_template.clone();
         self.resource_templates.push(template);
         self.resource_providers.insert(key, provider);
@@ -161,8 +195,13 @@ impl McpServer {
         self.tool_handlers.contains_key(name)
     }
 
-    pub async fn call_tool_handler(&self, name: &str, args: serde_json::Value) -> Result<ToolCallResult> {
-        let handler = self.tool_handlers
+    pub async fn call_tool_handler(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<ToolCallResult> {
+        let handler = self
+            .tool_handlers
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("No handler for tool: {}", name))?;
         let name_owned = name.to_string();
@@ -182,7 +221,8 @@ impl McpServer {
     }
 
     pub async fn read_resource(&self, uri: &str) -> Result<Vec<ResourceContents>> {
-        let provider = self.resource_providers
+        let provider = self
+            .resource_providers
             .get(uri)
             .ok_or_else(|| anyhow::anyhow!("No provider for resource: {}", uri))?;
         let uri_owned = uri.to_string();
@@ -197,8 +237,13 @@ impl McpServer {
         self.prompts.get(name)
     }
 
-    pub async fn get_prompt_result(&self, name: &str, args: serde_json::Value) -> Result<GetPromptResult> {
-        let handler = self.prompt_handlers
+    pub async fn get_prompt_result(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<GetPromptResult> {
+        let handler = self
+            .prompt_handlers
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("No handler for prompt: {}", name))?;
         (handler)(args).await
@@ -267,7 +312,8 @@ mod tests {
     fn test_mcp_server_register_tool_simple() {
         let mut server = McpServer::new("test", "1.0");
         server.register_tool_simple(
-            "test_tool".into(), "A test tool".into(),
+            "test_tool".into(),
+            "A test tool".into(),
             serde_json::json!({"type": "object"}),
         );
         assert_eq!(server.tool_count(), 1);
@@ -285,19 +331,29 @@ mod tests {
     #[test]
     fn test_mcp_server_list_resources() {
         let mut server = McpServer::new("test", "1.0");
-        server.resources.insert("file:///a".into(), McpResource {
-            uri: "file:///a".into(), name: "a".into(),
-            description: None, mime_type: None,
-        });
+        server.resources.insert(
+            "file:///a".into(),
+            McpResource {
+                uri: "file:///a".into(),
+                name: "a".into(),
+                description: None,
+                mime_type: None,
+            },
+        );
         assert_eq!(server.list_resources().len(), 1);
     }
 
     #[test]
     fn test_mcp_server_list_prompts() {
         let mut server = McpServer::new("test", "1.0");
-        server.prompts.insert("greeting".into(), McpPrompt {
-            name: "greeting".into(), description: None, arguments: vec![],
-        });
+        server.prompts.insert(
+            "greeting".into(),
+            McpPrompt {
+                name: "greeting".into(),
+                description: None,
+                arguments: vec![],
+            },
+        );
         assert_eq!(server.list_prompts().len(), 1);
     }
 
@@ -342,10 +398,15 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_server_handle_resources_list() {
         let mut server = McpServer::new("forge", "0.100.0");
-        server.resources.insert("file:///a".into(), McpResource {
-            uri: "file:///a".into(), name: "a.txt".into(),
-            description: None, mime_type: None,
-        });
+        server.resources.insert(
+            "file:///a".into(),
+            McpResource {
+                uri: "file:///a".into(),
+                name: "a.txt".into(),
+                description: None,
+                mime_type: None,
+            },
+        );
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: serde_json::json!(3),
@@ -361,9 +422,14 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_server_handle_prompts_list() {
         let mut server = McpServer::new("forge", "0.100.0");
-        server.prompts.insert("greeting".into(), McpPrompt {
-            name: "greeting".into(), description: Some("Say hello".into()), arguments: vec![],
-        });
+        server.prompts.insert(
+            "greeting".into(),
+            McpPrompt {
+                name: "greeting".into(),
+                description: Some("Say hello".into()),
+                arguments: vec![],
+            },
+        );
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: serde_json::json!(4),

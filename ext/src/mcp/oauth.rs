@@ -169,9 +169,9 @@ impl OAuth2Client {
 
     /// Get authorization header
     pub fn auth_header(&self) -> Option<String> {
-        self.token.as_ref().map(|t| {
-            format!("{} {}", t.token_type, t.access_token)
-        })
+        self.token
+            .as_ref()
+            .map(|t| format!("{} {}", t.token_type, t.access_token))
     }
 
     /// Check if authenticated

@@ -11,6 +11,7 @@ context = { path = "../context" }
 sandbox = { path = "../sandbox" }
 verify = { path = "../verify" }
 agents = { path = "../agents" }
+forge-ext = { package = "ext", path = "../ext" }
 
 clap = { workspace = true }
 anyhow = { workspace = true }

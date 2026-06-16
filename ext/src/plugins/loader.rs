@@ -58,8 +58,8 @@ impl PluginLoader {
     }
 
     fn version_satisfies(version: &PluginVersion, requirement: &str) -> bool {
-        if requirement.starts_with(">=") {
-            if let Ok(req_version) = PluginVersion::parse(&requirement[2..]) {
+        if let Some(req_str) = requirement.strip_prefix(">=") {
+            if let Ok(req_version) = PluginVersion::parse(req_str) {
                 return *version >= req_version;
             }
         } else if let Ok(req_version) = PluginVersion::parse(requirement) {
@@ -87,7 +87,11 @@ impl PluginLoader {
                             plugins.push(loaded);
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to parse plugin manifest {:?}: {}", manifest_path, e);
+                            tracing::warn!(
+                                "Failed to parse plugin manifest {:?}: {}",
+                                manifest_path,
+                                e
+                            );
                         }
                     }
                 }
@@ -212,15 +216,30 @@ mod tests {
 
     #[test]
     fn test_version_satisfies_exact() {
-        assert!(PluginLoader::version_satisfies(&PluginVersion::new(1, 0, 0), "1.0.0"));
-        assert!(!PluginLoader::version_satisfies(&PluginVersion::new(1, 0, 1), "1.0.0"));
+        assert!(PluginLoader::version_satisfies(
+            &PluginVersion::new(1, 0, 0),
+            "1.0.0"
+        ));
+        assert!(!PluginLoader::version_satisfies(
+            &PluginVersion::new(1, 0, 1),
+            "1.0.0"
+        ));
     }
 
     #[test]
     fn test_version_satisfies_gte() {
-        assert!(PluginLoader::version_satisfies(&PluginVersion::new(1, 1, 0), ">=1.0.0"));
-        assert!(PluginLoader::version_satisfies(&PluginVersion::new(1, 0, 0), ">=1.0.0"));
-        assert!(!PluginLoader::version_satisfies(&PluginVersion::new(0, 9, 0), ">=1.0.0"));
+        assert!(PluginLoader::version_satisfies(
+            &PluginVersion::new(1, 1, 0),
+            ">=1.0.0"
+        ));
+        assert!(PluginLoader::version_satisfies(
+            &PluginVersion::new(1, 0, 0),
+            ">=1.0.0"
+        ));
+        assert!(!PluginLoader::version_satisfies(
+            &PluginVersion::new(0, 9, 0),
+            ">=1.0.0"
+        ));
     }
 
     #[test]
@@ -256,22 +275,16 @@ installed_at = "2024-01-01T00:00:00Z"
     fn test_validate_and_load_ok() {
         let mut manifest = test_manifest();
         manifest.dependencies = vec![];
-        let result = PluginLoader::validate_and_load(
-            &manifest,
-            Path::new("/tmp/test"),
-            &[],
-        ).unwrap();
+        let result =
+            PluginLoader::validate_and_load(&manifest, Path::new("/tmp/test"), &[]).unwrap();
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_and_load_missing_deps() {
         let manifest = test_manifest();
-        let result = PluginLoader::validate_and_load(
-            &manifest,
-            Path::new("/tmp/test"),
-            &[],
-        ).unwrap();
+        let result =
+            PluginLoader::validate_and_load(&manifest, Path::new("/tmp/test"), &[]).unwrap();
         assert!(result.is_err());
         assert!(result.unwrap_err()[0].contains("core"));
     }

@@ -7,7 +7,10 @@ use super::server::McpServer;
 use anyhow::Result;
 
 /// Handle incoming MCP request (async to support resource/prompt handlers)
-pub async fn handle_request(server: &mut McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+pub async fn handle_request(
+    server: &mut McpServer,
+    request: &JsonRpcRequest,
+) -> Result<JsonRpcResponse> {
     match request.method.as_str() {
         METHOD_INITIALIZE => handle_initialize(server, request),
         METHOD_INITIALIZED => handle_initialized(server, request),
@@ -23,16 +26,29 @@ pub async fn handle_request(server: &mut McpServer, request: &JsonRpcRequest) ->
         METHOD_PROMPTS_GET => handle_get_prompt(server, request).await,
         METHOD_LOGGING_SET_LEVEL => handle_set_level(server, request),
         METHOD_ROOTS_LIST => handle_list_roots(server, request),
-        _ => Ok(error_response(&request.id, JsonRpcError::method_not_found(&request.method))),
+        _ => Ok(error_response(
+            &request.id,
+            JsonRpcError::method_not_found(&request.method),
+        )),
     }
 }
 
 fn error_response(id: &serde_json::Value, error: JsonRpcError) -> JsonRpcResponse {
-    JsonRpcResponse { jsonrpc: "2.0".into(), id: id.clone(), result: None, error: Some(error) }
+    JsonRpcResponse {
+        jsonrpc: "2.0".into(),
+        id: id.clone(),
+        result: None,
+        error: Some(error),
+    }
 }
 
 fn success_response(id: &serde_json::Value, result: serde_json::Value) -> JsonRpcResponse {
-    JsonRpcResponse { jsonrpc: "2.0".into(), id: id.clone(), result: Some(result), error: None }
+    JsonRpcResponse {
+        jsonrpc: "2.0".into(),
+        id: id.clone(),
+        result: Some(result),
+        error: None,
+    }
 }
 
 fn handle_initialize(server: &mut McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
@@ -46,7 +62,10 @@ fn handle_initialize(server: &mut McpServer, request: &JsonRpcRequest) -> Result
     Ok(success_response(&request.id, serde_json::to_value(result)?))
 }
 
-fn handle_initialized(_server: &mut McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+fn handle_initialized(
+    _server: &mut McpServer,
+    request: &JsonRpcRequest,
+) -> Result<JsonRpcResponse> {
     Ok(success_response(&request.id, serde_json::json!({})))
 }
 
@@ -55,36 +74,59 @@ fn handle_ping(request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
 }
 
 fn handle_list_tools(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    Ok(success_response(&request.id, serde_json::json!({ "tools": server.list_tools() })))
+    Ok(success_response(
+        &request.id,
+        serde_json::json!({ "tools": server.list_tools() }),
+    ))
 }
 
 async fn handle_call_tool(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
     let params = match request.params.as_ref() {
         Some(p) => p,
-        None => return Ok(error_response(&request.id, JsonRpcError::invalid_params("Missing params"))),
+        None => {
+            return Ok(error_response(
+                &request.id,
+                JsonRpcError::invalid_params("Missing params"),
+            ))
+        }
     };
     let tool_name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
-        None => return Ok(error_response(&request.id, JsonRpcError::invalid_params("Missing tool name"))),
+        None => {
+            return Ok(error_response(
+                &request.id,
+                JsonRpcError::invalid_params("Missing tool name"),
+            ))
+        }
     };
-    let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     if !server.has_tool_handler(tool_name) {
         if server.get_tool(tool_name).is_some() {
             let result = ToolCallResult {
-                content: vec![Content::Text { text: format!("Tool '{}' registered but no handler attached", tool_name) }],
+                content: vec![Content::Text {
+                    text: format!("Tool '{}' registered but no handler attached", tool_name),
+                }],
                 is_error: Some(false),
             };
             return Ok(success_response(&request.id, serde_json::to_value(result)?));
         }
-        return Ok(error_response(&request.id, JsonRpcError::invalid_params(&format!("Tool not found: {}", tool_name))));
+        return Ok(error_response(
+            &request.id,
+            JsonRpcError::invalid_params(&format!("Tool not found: {}", tool_name)),
+        ));
     }
 
     match server.call_tool_handler(tool_name, arguments).await {
         Ok(result) => Ok(success_response(&request.id, serde_json::to_value(result)?)),
         Err(e) => {
             let result = ToolCallResult {
-                content: vec![Content::Text { text: format!("Error: {}", e) }],
+                content: vec![Content::Text {
+                    text: format!("Error: {}", e),
+                }],
                 is_error: Some(true),
             };
             Ok(success_response(&request.id, serde_json::to_value(result)?))
@@ -93,31 +135,61 @@ async fn handle_call_tool(server: &McpServer, request: &JsonRpcRequest) -> Resul
 }
 
 fn handle_list_resources(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    Ok(success_response(&request.id, serde_json::json!({ "resources": server.list_resources() })))
+    Ok(success_response(
+        &request.id,
+        serde_json::json!({ "resources": server.list_resources() }),
+    ))
 }
 
-fn handle_list_resource_templates(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    Ok(success_response(&request.id, serde_json::json!({ "resourceTemplates": server.list_resource_templates() })))
+fn handle_list_resource_templates(
+    server: &McpServer,
+    request: &JsonRpcRequest,
+) -> Result<JsonRpcResponse> {
+    Ok(success_response(
+        &request.id,
+        serde_json::json!({ "resourceTemplates": server.list_resource_templates() }),
+    ))
 }
 
-async fn handle_read_resource(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+async fn handle_read_resource(
+    server: &McpServer,
+    request: &JsonRpcRequest,
+) -> Result<JsonRpcResponse> {
     let params = match request.params.as_ref() {
         Some(p) => p,
-        None => return Ok(error_response(&request.id, JsonRpcError::invalid_params("Missing params"))),
+        None => {
+            return Ok(error_response(
+                &request.id,
+                JsonRpcError::invalid_params("Missing params"),
+            ))
+        }
     };
     let uri = match params.get("uri").and_then(|v| v.as_str()) {
         Some(u) => u,
-        None => return Ok(error_response(&request.id, JsonRpcError::invalid_params("Missing uri"))),
+        None => {
+            return Ok(error_response(
+                &request.id,
+                JsonRpcError::invalid_params("Missing uri"),
+            ))
+        }
     };
 
     match server.read_resource(uri).await {
-        Ok(contents) => Ok(success_response(&request.id, serde_json::json!({ "contents": contents }))),
-        Err(e) => Ok(error_response(&request.id, JsonRpcError::internal_error(&e.to_string()))),
+        Ok(contents) => Ok(success_response(
+            &request.id,
+            serde_json::json!({ "contents": contents }),
+        )),
+        Err(e) => Ok(error_response(
+            &request.id,
+            JsonRpcError::internal_error(&e.to_string()),
+        )),
     }
 }
 
 fn handle_subscribe(server: &mut McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    let uri = request.params.as_ref()
+    let uri = request
+        .params
+        .as_ref()
         .and_then(|p| p.get("uri"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -126,7 +198,9 @@ fn handle_subscribe(server: &mut McpServer, request: &JsonRpcRequest) -> Result<
 }
 
 fn handle_unsubscribe(server: &mut McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    let uri = request.params.as_ref()
+    let uri = request
+        .params
+        .as_ref()
         .and_then(|p| p.get("uri"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -135,36 +209,67 @@ fn handle_unsubscribe(server: &mut McpServer, request: &JsonRpcRequest) -> Resul
 }
 
 fn handle_list_roots(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    let roots = server.get_roots().iter().map(|r| Root {
-        uri: r.uri.clone(),
-        name: r.name.clone(),
-    }).collect::<Vec<_>>();
-    Ok(success_response(&request.id, serde_json::json!({ "roots": roots })))
+    let roots = server
+        .get_roots()
+        .iter()
+        .map(|r| Root {
+            uri: r.uri.clone(),
+            name: r.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    Ok(success_response(
+        &request.id,
+        serde_json::json!({ "roots": roots }),
+    ))
 }
 
 fn handle_list_prompts(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    Ok(success_response(&request.id, serde_json::json!({ "prompts": server.list_prompts() })))
+    Ok(success_response(
+        &request.id,
+        serde_json::json!({ "prompts": server.list_prompts() }),
+    ))
 }
 
-async fn handle_get_prompt(server: &McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+async fn handle_get_prompt(
+    server: &McpServer,
+    request: &JsonRpcRequest,
+) -> Result<JsonRpcResponse> {
     let params = match request.params.as_ref() {
         Some(p) => p,
-        None => return Ok(error_response(&request.id, JsonRpcError::invalid_params("Missing params"))),
+        None => {
+            return Ok(error_response(
+                &request.id,
+                JsonRpcError::invalid_params("Missing params"),
+            ))
+        }
     };
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
-        None => return Ok(error_response(&request.id, JsonRpcError::invalid_params("Missing prompt name"))),
+        None => {
+            return Ok(error_response(
+                &request.id,
+                JsonRpcError::invalid_params("Missing prompt name"),
+            ))
+        }
     };
-    let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     match server.get_prompt_result(name, arguments).await {
         Ok(result) => Ok(success_response(&request.id, serde_json::to_value(result)?)),
-        Err(e) => Ok(error_response(&request.id, JsonRpcError::invalid_params(&e.to_string()))),
+        Err(e) => Ok(error_response(
+            &request.id,
+            JsonRpcError::invalid_params(&e.to_string()),
+        )),
     }
 }
 
 fn handle_set_level(server: &mut McpServer, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-    let level = request.params.as_ref()
+    let level = request
+        .params
+        .as_ref()
         .and_then(|p| p.get("level"))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or(LogLevel::Info);
@@ -179,7 +284,12 @@ mod tests {
     use std::sync::Arc;
 
     fn make_request(id: i32, method: &str) -> JsonRpcRequest {
-        JsonRpcRequest { jsonrpc: "2.0".into(), id: serde_json::json!(id), method: method.into(), params: None }
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(id),
+            method: method.into(),
+            params: None,
+        }
     }
 
     #[tokio::test]
@@ -214,7 +324,9 @@ mod tests {
     async fn test_handle_tools_call_unknown() {
         let mut server = McpServer::new("forge", "0.100.0");
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!(1), method: METHOD_TOOLS_CALL.into(),
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(1),
+            method: METHOD_TOOLS_CALL.into(),
             params: Some(serde_json::json!({"name": "nonexistent", "arguments": {}})),
         };
         let resp = handle_request(&mut server, &req).await.unwrap();
@@ -226,7 +338,9 @@ mod tests {
         let mut server = McpServer::new("forge", "0.100.0");
         server.register_tool_simple("test".into(), "Test".into(), serde_json::json!({}));
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!(1), method: METHOD_TOOLS_CALL.into(),
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(1),
+            method: METHOD_TOOLS_CALL.into(),
             params: Some(serde_json::json!({"name": "test", "arguments": {}})),
         };
         let resp = handle_request(&mut server, &req).await.unwrap();
@@ -237,10 +351,15 @@ mod tests {
     #[tokio::test]
     async fn test_handle_resources_list() {
         let mut server = McpServer::new("forge", "0.100.0");
-        server.register_resource(McpResource {
-            uri: "file:///a".into(), name: "a.txt".into(),
-            description: None, mime_type: None,
-        }, Arc::new(|_| Box::pin(async { Ok(vec![]) })));
+        server.register_resource(
+            McpResource {
+                uri: "file:///a".into(),
+                name: "a.txt".into(),
+                description: None,
+                mime_type: None,
+            },
+            Arc::new(|_| Box::pin(async { Ok(vec![]) })),
+        );
         let req = make_request(1, METHOD_RESOURCES_LIST);
         let resp = handle_request(&mut server, &req).await.unwrap();
         let result = resp.result.unwrap();
@@ -251,9 +370,21 @@ mod tests {
     #[tokio::test]
     async fn test_handle_prompts_list() {
         let mut server = McpServer::new("forge", "0.100.0");
-        server.register_prompt(McpPrompt {
-            name: "greeting".into(), description: None, arguments: vec![],
-        }, Arc::new(|_| Box::pin(async { Ok(GetPromptResult { description: None, messages: vec![] }) })));
+        server.register_prompt(
+            McpPrompt {
+                name: "greeting".into(),
+                description: None,
+                arguments: vec![],
+            },
+            Arc::new(|_| {
+                Box::pin(async {
+                    Ok(GetPromptResult {
+                        description: None,
+                        messages: vec![],
+                    })
+                })
+            }),
+        );
         let req = make_request(1, METHOD_PROMPTS_LIST);
         let resp = handle_request(&mut server, &req).await.unwrap();
         let result = resp.result.unwrap();
@@ -265,7 +396,9 @@ mod tests {
     async fn test_handle_set_level() {
         let mut server = McpServer::new("forge", "0.100.0");
         let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(), id: serde_json::json!(1), method: METHOD_LOGGING_SET_LEVEL.into(),
+            jsonrpc: "2.0".into(),
+            id: serde_json::json!(1),
+            method: METHOD_LOGGING_SET_LEVEL.into(),
             params: Some(serde_json::json!({"level": "debug"})),
         };
         let resp = handle_request(&mut server, &req).await.unwrap();

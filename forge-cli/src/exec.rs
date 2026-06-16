@@ -20,14 +20,13 @@ pub struct ExecConfig {
     pub provider: String,
     pub model: String,
     pub verify: bool,
-    pub output_format: String, // "json" | "text"
-    pub trace: bool,
 }
 
 /// Optional forge.toml shape consumed by exec mode.
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ForgeToml {
     verify: Option<VerifyToml>,
+    mcp: Option<McpToml>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -41,6 +40,23 @@ struct VerifyToml {
     max_retries: Option<usize>,
 }
 
+/// `[mcp]` config: external MCP stdio servers to connect to before the run.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct McpToml {
+    /// Stdio servers, keyed by an arbitrary label.
+    #[serde(default)]
+    servers: std::collections::HashMap<String, McpServerToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpServerToml {
+    /// Command to launch the server.
+    command: String,
+    /// Arguments passed to the command.
+    #[serde(default)]
+    args: Vec<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -52,6 +68,7 @@ pub struct ExecResult {
     pub task_id: String,
     pub duration_ms: u64,
     pub steps_completed: usize,
+    pub verify_requested: bool,
     pub verify_passed: bool,
     pub error_message: Option<String>,
 }
@@ -59,7 +76,7 @@ pub struct ExecResult {
 impl ExecResult {
     /// Get exit code for CI/CD
     pub fn exit_code(&self) -> i32 {
-        if self.success && self.verify_passed {
+        if self.success && (!self.verify_requested || self.verify_passed) {
             0
         } else {
             1
@@ -141,7 +158,8 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
         )
     })?;
 
-    let provider = crate::create_provider_instance(&config.provider, &config.model, &config.api_key)?;
+    let provider =
+        crate::create_provider_instance(&config.provider, &config.model, &config.api_key)?;
     let forge_toml = load_forge_toml(&config.config_path)?;
     let verify_commands = resolve_verify_commands(&workdir, forge_toml.as_ref());
     let max_retries = forge_toml
@@ -154,6 +172,9 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
     let sandbox = Sandbox::new(&workdir, "off")?;
     let mut event_loop = EventLoop::new(provider, context, sandbox, config.task.clone());
 
+    // Connect any configured MCP stdio servers so their tools are available.
+    event_loop = attach_mcp_servers(event_loop, forge_toml.as_ref()).await?;
+
     let (steps, verify_passed) = if config.verify {
         if let Some(commands) = verify_commands {
             let verifier = CommandVerifier::new(commands);
@@ -162,7 +183,7 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
                 .await
             {
                 Ok(steps) => (steps, true),
-                Err(e) => return failed_result(task_id, start, e),
+                Err(e) => return failed_result(task_id, start, config.verify, e),
             }
         } else {
             let verifier = BuildVerifier::new();
@@ -171,12 +192,14 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
                 .await
             {
                 Ok(steps) => (steps, true),
-                Err(e) => return failed_result(task_id, start, e),
+                Err(e) => return failed_result(task_id, start, config.verify, e),
             }
         }
     } else {
-        let steps = event_loop.run().await?;
-        (steps, false)
+        match event_loop.run().await {
+            Ok(steps) => (steps, false),
+            Err(e) => return failed_result(task_id, start, config.verify, e),
+        }
     };
 
     Ok(ExecResult {
@@ -184,6 +207,7 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
         task_id,
         duration_ms: start.elapsed().as_millis() as u64,
         steps_completed: steps,
+        verify_requested: config.verify,
         verify_passed,
         error_message: None,
     })
@@ -192,6 +216,7 @@ pub async fn run_exec(config: ExecConfig) -> anyhow::Result<ExecResult> {
 fn failed_result(
     task_id: String,
     start: Instant,
+    verify_requested: bool,
     error: anyhow::Error,
 ) -> anyhow::Result<ExecResult> {
     Ok(ExecResult {
@@ -199,12 +224,36 @@ fn failed_result(
         task_id,
         duration_ms: start.elapsed().as_millis() as u64,
         steps_completed: 0,
+        verify_requested,
         verify_passed: false,
         error_message: Some(error.to_string()),
     })
 }
 
+/// Connect each configured `[mcp.servers.*]` stdio server to the event loop.
+/// A failure to launch one server is logged and skipped rather than aborting
+/// the whole run.
+async fn attach_mcp_servers<P: provider::ModelProvider>(
+    mut event_loop: forge_core::EventLoop<P>,
+    config: Option<&ForgeToml>,
+) -> Result<forge_core::EventLoop<P>> {
+    let Some(mcp) = config.and_then(|toml| toml.mcp.as_ref()) else {
+        return Ok(event_loop);
+    };
 
+    for (label, server) in &mcp.servers {
+        if let Err(e) = event_loop
+            .with_mcp_client(server.command.clone(), server.args.clone())
+            .await
+        {
+            tracing::warn!("Failed to connect MCP server '{}': {} — skipping", label, e);
+        } else {
+            tracing::info!("Connected MCP server '{}'", label);
+        }
+    }
+
+    Ok(event_loop)
+}
 
 fn load_forge_toml(path: &Path) -> Result<Option<ForgeToml>> {
     if !path.exists() {
@@ -291,8 +340,6 @@ mod tests {
             provider: "anthropic".to_string(),
             model: "claude-opus-4-5".to_string(),
             verify: true,
-            output_format: "json".to_string(),
-            trace: false,
         };
         assert_eq!(config.task, "Fix the bug");
         assert!(config.verify);
@@ -305,6 +352,7 @@ mod tests {
             task_id: "test-123".to_string(),
             duration_ms: 1000,
             steps_completed: 5,
+            verify_requested: true,
             verify_passed: true,
             error_message: None,
         };
@@ -320,16 +368,29 @@ mod tests {
             task_id: "test".to_string(),
             duration_ms: 1000,
             steps_completed: 1,
+            verify_requested: true,
             verify_passed: true,
             error_message: None,
         };
         assert_eq!(result.exit_code(), 0);
+
+        let result_no_verify = ExecResult {
+            success: true,
+            task_id: "test".to_string(),
+            duration_ms: 1000,
+            steps_completed: 1,
+            verify_requested: false,
+            verify_passed: false,
+            error_message: None,
+        };
+        assert_eq!(result_no_verify.exit_code(), 0);
 
         let result_fail = ExecResult {
             success: false,
             task_id: "test".to_string(),
             duration_ms: 1000,
             steps_completed: 1,
+            verify_requested: true,
             verify_passed: false,
             error_message: Some("Error".to_string()),
         };
@@ -343,6 +404,7 @@ mod tests {
             task_id: "test-abc".to_string(),
             duration_ms: 500,
             steps_completed: 3,
+            verify_requested: true,
             verify_passed: true,
             error_message: None,
         };
@@ -370,10 +432,37 @@ mod tests {
                 auto_detect: true,
                 max_retries: Some(2),
             }),
+            mcp: None,
         };
         assert_eq!(
             resolve_verify_commands(Path::new("."), Some(&toml)).unwrap(),
             vec!["just verify"]
         );
+    }
+
+    /// End-to-end offline smoke test: `forge exec` with the mock provider must
+    /// complete with no network and no API key. This is the Phase 0 DoD gate
+    /// for "forge exec runs end-to-end via mock/local provider".
+    #[tokio::test]
+    async fn exec_runs_offline_with_mock_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ExecConfig {
+            task: "say hello".to_string(),
+            project_path: dir.path().to_path_buf(),
+            // No forge.toml in the temp dir -> defaults / auto-detect.
+            config_path: dir.path().join("forge.toml"),
+            api_key: String::new(),
+            provider: "mock".to_string(),
+            model: "mock-1".to_string(),
+            // Empty dir has no detectable build, so skip verify here; the loop
+            // itself is exercised regardless.
+            verify: false,
+        };
+
+        let result = run_exec(config).await.unwrap();
+        assert!(result.success, "mock exec should succeed offline");
+        assert_eq!(result.exit_code(), 0); // verify_requested=false -> success
+        assert!(result.steps_completed >= 1);
+        assert!(result.error_message.is_none());
     }
 }

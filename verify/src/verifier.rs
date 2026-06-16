@@ -282,10 +282,14 @@ mod tests {
     #[tokio::test]
     async fn test_config_commands() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("forge.toml"), r#"
+        std::fs::write(
+            dir.path().join("forge.toml"),
+            r#"
 [verify]
 commands = ["echo hello", "echo world"]
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let verifier = BuildVerifier::new();
         let result = agents::Verifier::quick_check(&verifier, dir.path()).await;
         assert!(result.unwrap());

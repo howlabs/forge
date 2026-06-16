@@ -30,13 +30,38 @@ pub enum ConversationEntry {
     User(String),
     Assistant(String),
     System(String),
-    ToolCall { name: String, result: String },
-    VerifyResult { passed: bool, logs: String },
+    ToolCall {
+        name: String,
+        result: String,
+    },
+    Diff {
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
+    VerifyResult {
+        passed: bool,
+        logs: String,
+    },
+}
+
+/// Trim long tool output / diffs so a single event cannot flood the panel.
+fn truncate_for_display(text: &str, max: usize) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let kept: String = trimmed.chars().take(max).collect();
+    format!("{kept}… (truncated)")
 }
 
 #[derive(Debug)]
 enum AgentUpdate {
-    Done { steps: usize },
+    /// A live progress event from the running event loop.
+    Progress(forge_core::LoopEvent),
+    Done {
+        steps: usize,
+    },
     Error(String),
 }
 
@@ -253,6 +278,22 @@ impl SimpleTui {
             let mut event_loop =
                 forge_core::event_loop::EventLoop::new(provider, context, sandbox, task_clone);
 
+            // Forward live loop events into the TUI update channel so the
+            // conversation panel can show tool calls, output, and diffs as
+            // they happen rather than only a final Done/Error.
+            let (loop_tx, mut loop_rx) =
+                tokio::sync::mpsc::unbounded_channel::<forge_core::LoopEvent>();
+            event_loop = event_loop.with_observer(loop_tx);
+
+            let forward_tx = tx_clone.clone();
+            let forwarder = tokio::spawn(async move {
+                while let Some(event) = loop_rx.recv().await {
+                    if forward_tx.send(AgentUpdate::Progress(event)).is_err() {
+                        break;
+                    }
+                }
+            });
+
             match event_loop.run().await {
                 Ok(steps) => {
                     let _ = tx_clone.send(AgentUpdate::Done { steps });
@@ -261,44 +302,106 @@ impl SimpleTui {
                     let _ = tx_clone.send(AgentUpdate::Error(e.to_string()));
                 }
             }
+            // Drop the loop sender (held by event_loop) by ending scope, then
+            // let the forwarder drain any remaining events.
+            drop(event_loop);
+            let _ = forwarder.await;
         });
 
         self.agent_rx = Some(rx);
     }
 
     async fn poll_agent_updates(&mut self) {
-        let Some(rx) = self.agent_rx.as_mut() else {
-            return;
-        };
-        match rx.try_recv() {
-            Ok(update) => {
-                match update {
-                    AgentUpdate::Done { steps } => self.add_entry(ConversationEntry::System(
-                        format!("Task complete in {} steps", steps),
-                    )),
-                    AgentUpdate::Error(e) => {
-                        self.add_entry(ConversationEntry::System(format!("Error: {}", e)))
-                    }
-                }
-                self.agent_running = false;
-                self.agent_rx = None;
-                if let Some(next) = self.queued_messages.first().cloned() {
-                    self.queued_messages.remove(0);
+        // Drain everything currently queued so fast tool/diff bursts show up
+        // within one frame instead of one-per-tick.
+        loop {
+            let Some(rx) = self.agent_rx.as_mut() else {
+                return;
+            };
+            match rx.try_recv() {
+                Ok(AgentUpdate::Progress(event)) => self.handle_loop_event(event),
+                Ok(AgentUpdate::Done { steps }) => {
                     self.add_entry(ConversationEntry::System(format!(
-                        "Running queued message: {}",
-                        next
+                        "Task complete in {} steps",
+                        steps
                     )));
-                    self.start_agent_task(next);
+                    self.finish_agent_task();
+                    return;
+                }
+                Ok(AgentUpdate::Error(e)) => {
+                    self.add_entry(ConversationEntry::System(format!("Error: {}", e)));
+                    self.finish_agent_task();
+                    return;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.add_entry(ConversationEntry::System(
+                        "Agent task stopped unexpectedly".to_string(),
+                    ));
+                    self.agent_running = false;
+                    self.agent_rx = None;
+                    return;
                 }
             }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                self.add_entry(ConversationEntry::System(
-                    "Agent task stopped unexpectedly".to_string(),
-                ));
-                self.agent_running = false;
-                self.agent_rx = None;
+        }
+    }
+
+    /// Render a live event from the running event loop into the conversation.
+    fn handle_loop_event(&mut self, event: forge_core::LoopEvent) {
+        use forge_core::LoopEvent;
+        match event {
+            LoopEvent::AssistantMessage { content, .. } => {
+                self.add_entry(ConversationEntry::Assistant(content));
             }
+            LoopEvent::ToolStarted { name } => {
+                self.add_entry(ConversationEntry::ToolCall {
+                    name,
+                    result: "running...".to_string(),
+                });
+            }
+            LoopEvent::ToolCompleted {
+                name,
+                result,
+                is_error,
+            } => {
+                let result = truncate_for_display(&result, 800);
+                let prefix = if is_error { "error: " } else { "" };
+                self.add_entry(ConversationEntry::ToolCall {
+                    name,
+                    result: format!("{prefix}{result}"),
+                });
+            }
+            LoopEvent::DiffApplied {
+                path,
+                old_text,
+                new_text,
+            } => {
+                self.add_entry(ConversationEntry::Diff {
+                    path,
+                    old_text: truncate_for_display(&old_text, 400),
+                    new_text: truncate_for_display(&new_text, 400),
+                });
+            }
+            LoopEvent::VerifyResult { passed, logs } => {
+                self.add_entry(ConversationEntry::VerifyResult {
+                    passed,
+                    logs: truncate_for_display(&logs, 800),
+                });
+            }
+        }
+    }
+
+    /// Finish the current agent task and start the next queued message, if any.
+    fn finish_agent_task(&mut self) {
+        self.agent_running = false;
+        self.agent_rx = None;
+        if let Some(next) = self.queued_messages.first().cloned() {
+            self.queued_messages.remove(0);
+            self.add_entry(ConversationEntry::System(format!(
+                "Running queued message: {}",
+                next
+            )));
+            self.start_agent_task(next);
         }
     }
 
@@ -438,6 +541,14 @@ impl SimpleTui {
                     ConversationEntry::ToolCall { name, result } => {
                         (Color::Magenta, format!("[tool: {}] {}", name, result))
                     }
+                    ConversationEntry::Diff {
+                        path,
+                        old_text,
+                        new_text,
+                    } => (
+                        Color::Yellow,
+                        format!("[diff: {}]\n- {}\n+ {}", path, old_text, new_text),
+                    ),
                     ConversationEntry::VerifyResult { passed, logs } => {
                         let color = if *passed { Color::Green } else { Color::Red };
                         (color, format!("[verify: {}] {}", passed, logs))
@@ -574,5 +685,49 @@ mod tests {
 
         tui.agent_running = true;
         assert!(tui.status_text().contains("[WORKING...]"));
+    }
+
+    #[test]
+    fn test_handle_loop_event_renders_tool_and_diff() {
+        use forge_core::LoopEvent;
+        let mut tui = test_tui();
+
+        tui.handle_loop_event(LoopEvent::ToolStarted {
+            name: "run_command".to_string(),
+        });
+        tui.handle_loop_event(LoopEvent::ToolCompleted {
+            name: "run_command".to_string(),
+            result: "ok".to_string(),
+            is_error: false,
+        });
+        tui.handle_loop_event(LoopEvent::DiffApplied {
+            path: "src/lib.rs".to_string(),
+            old_text: "a".to_string(),
+            new_text: "b".to_string(),
+        });
+        tui.handle_loop_event(LoopEvent::VerifyResult {
+            passed: true,
+            logs: "all green".to_string(),
+        });
+
+        // started + completed + diff + verify = 4 entries
+        assert_eq!(tui.conversation.len(), 4);
+        assert!(matches!(
+            tui.conversation[2],
+            ConversationEntry::Diff { .. }
+        ));
+        assert!(matches!(
+            tui.conversation[3],
+            ConversationEntry::VerifyResult { passed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn test_truncate_for_display() {
+        assert_eq!(truncate_for_display("short", 100), "short");
+        let long = "x".repeat(50);
+        let out = truncate_for_display(&long, 10);
+        assert!(out.contains("truncated"));
+        assert!(out.chars().count() < long.len());
     }
 }

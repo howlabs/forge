@@ -90,6 +90,16 @@ jobs:
           HTTPS_PROXY: http://127.0.0.1:9
           NO_PROXY: ""
 
+      # Phase 0 DoD gate: `forge exec` must run end-to-end with the offline
+      # `mock` provider — no API key, no network. This pins the acceptance
+      # criterion as its own failing-loud step in addition to the suite above.
+      - name: smoke - forge exec (mock provider, offline)
+        run: cargo test -p forge-cli exec_runs_offline_with_mock_provider -- --exact
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: ""
+
   release-binary:
     name: release binary (ubuntu)
     needs: build-and-test

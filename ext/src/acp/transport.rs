@@ -103,8 +103,15 @@ mod tests {
         let stdout = proc.stdout.unwrap();
         let transport = StdioAcpTransport::new(stdin, stdout);
 
-        let req = AcpRequest { id: "1".into(), method: METHOD_PING.into(), params: None };
-        transport.send_raw(&serde_json::to_string(&req).unwrap()).await.unwrap();
+        let req = AcpRequest {
+            id: "1".into(),
+            method: METHOD_PING.into(),
+            params: None,
+        };
+        transport
+            .send_raw(&serde_json::to_string(&req).unwrap())
+            .await
+            .unwrap();
         let received = transport.receive_raw().await.unwrap();
         assert!(received.contains("ping"));
     }

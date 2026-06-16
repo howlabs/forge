@@ -1,6 +1,6 @@
 use anyhow::Result;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event, EventKind};
 use context::ContextIndex;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +34,10 @@ impl FileWatcher {
         debug!("Creating file watcher for: {}", watch_path.display());
 
         if !watch_path.exists() {
-            return Err(anyhow::anyhow!("Watch path does not exist: {}", watch_path.display()));
+            return Err(anyhow::anyhow!(
+                "Watch path does not exist: {}",
+                watch_path.display()
+            ));
         }
 
         Ok(Self {
@@ -87,7 +90,8 @@ impl FileWatcher {
             let _watcher = watcher;
             info!("File watcher event processor started");
 
-            let mut dirty_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+            let mut dirty_paths: std::collections::HashSet<PathBuf> =
+                std::collections::HashSet::new();
             let mut timer = tokio::time::interval(Duration::from_millis(100)); // frequent tick
             let mut last_event_time = tokio::time::Instant::now();
 
@@ -102,13 +106,13 @@ impl FileWatcher {
                         if matches!(event.kind, EventKind::Access(_)) {
                             continue;
                         }
-                        
+
                         let mut added = false;
                         for path in event.paths {
                             if path.is_dir() {
                                 continue;
                             }
-                            
+
                             // Filtering: only index files we know how to parse, and skip ignored dirs
                             if !Self::should_index(&watch_path, &path) {
                                 continue;
@@ -126,7 +130,7 @@ impl FileWatcher {
                         if !dirty_paths.is_empty() && last_event_time.elapsed() >= debounce_timeout {
                             let paths_to_process = std::mem::take(&mut dirty_paths);
                             debug!("Processing {} debounced paths", paths_to_process.len());
-                            
+
                             for path in paths_to_process {
                                 if let Err(e) = Self::process_path(&context_index, &path).await {
                                     warn!("Failed to process file {}: {}", path.display(), e);
@@ -156,16 +160,13 @@ impl FileWatcher {
                 }
             }
         }
-        
+
         // Only index supported languages
         context::lang::Lang::for_path(path).is_some()
     }
 
     /// Process a single debounced path
-    async fn process_path(
-        context_index: &Arc<Mutex<dyn ContextIndex>>,
-        path: &Path,
-    ) -> Result<()> {
+    async fn process_path(context_index: &Arc<Mutex<dyn ContextIndex>>, path: &Path) -> Result<()> {
         // Since we debounced, the file might have been created and deleted rapidly,
         // or just modified. We check its current existence to decide what to do.
         if path.exists() {
@@ -190,7 +191,11 @@ impl FileWatcher {
         index.upsert_file(path, &content);
         drop(index);
 
-        debug!("Upserted file: {} ({} bytes)", path.display(), content.len());
+        debug!(
+            "Upserted file: {} ({} bytes)",
+            path.display(),
+            content.len()
+        );
         Ok(())
     }
 
@@ -231,9 +236,11 @@ mod tests {
         fn remove_file(&mut self, path: &Path) {
             self.removes.insert(path.to_path_buf());
         }
-        fn resolve_symbol(&self, _name: &str) -> Option<context::symbols::Symbol> { None }
+        fn resolve_symbol(&self, _name: &str) -> Option<context::symbols::Symbol> {
+            None
+        }
     }
-    use std::fs::{self, File};
+    use std::fs::File;
     use std::io::Write;
     use tempfile::TempDir;
 
