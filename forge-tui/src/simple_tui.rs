@@ -112,6 +112,8 @@ pub struct SimpleTui {
     checkpoint_available: Option<String>,
     theme_mode: ThemeMode,
     stream_queue: Vec<char>,
+    autocomplete_options: Vec<String>,
+    autocomplete_index: usize,
 }
 
 impl SimpleTui {
@@ -145,6 +147,8 @@ impl SimpleTui {
             checkpoint_available: None,
             theme_mode: ThemeMode::Dark,
             stream_queue: Vec::new(),
+            autocomplete_options: Vec::new(),
+            autocomplete_index: 0,
         }
     }
 
@@ -250,8 +254,24 @@ impl SimpleTui {
                         }
                     }
                     KeyCode::Enter => {
-                        if !self.input.trim().is_empty() {
-                            if self.agent_running {
+                        if !self.autocomplete_options.is_empty() {
+                            let option = self.autocomplete_options[self.autocomplete_index].clone();
+                            self.input = option.clone();
+                            self.cursor = self.input.len();
+                            self.update_autocomplete_options();
+                            if !option.ends_with(' ') && !option.ends_with('/') {
+                                self.autocomplete_options.clear();
+                                self.autocomplete_index = 0;
+                                if !self.input.trim().is_empty() {
+                                    if self.agent_running && !self.is_local_command(&self.input) {
+                                        self.queue_current_input();
+                                    } else {
+                                        self.send_message().await;
+                                    }
+                                }
+                            }
+                        } else if !self.input.trim().is_empty() {
+                            if self.agent_running && !self.is_local_command(&self.input) {
                                 self.queue_current_input();
                             } else {
                                 self.send_message().await;
@@ -263,6 +283,7 @@ impl SimpleTui {
                             let previous = self.previous_cursor_boundary();
                             self.input.drain(previous..self.cursor);
                             self.cursor = previous;
+                            self.update_autocomplete_options();
                         }
                     }
                     KeyCode::Delete => {
@@ -282,6 +303,16 @@ impl SimpleTui {
                     KeyCode::End => {
                         self.cursor = self.input.len();
                     }
+                    KeyCode::Up if !self.autocomplete_options.is_empty() => {
+                        if self.autocomplete_index > 0 {
+                            self.autocomplete_index -= 1;
+                        } else {
+                            self.autocomplete_index = self.autocomplete_options.len().saturating_sub(1);
+                        }
+                    }
+                    KeyCode::Down if !self.autocomplete_options.is_empty() => {
+                        self.autocomplete_index = (self.autocomplete_index + 1) % self.autocomplete_options.len();
+                    }
                     KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.history_back();
                     }
@@ -291,18 +322,26 @@ impl SimpleTui {
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.input.clear();
                         self.cursor = 0;
+                        self.update_autocomplete_options();
                     }
                     KeyCode::Tab => {
-                        self.focus = if !self.diff_hunks.is_empty() {
-                            Focus::Diff
+                        if !self.autocomplete_options.is_empty() {
+                            self.input = self.autocomplete_options[self.autocomplete_index].clone();
+                            self.cursor = self.input.len();
+                            self.update_autocomplete_options();
                         } else {
-                            Focus::Conversation
-                        };
+                            self.focus = if !self.diff_hunks.is_empty() {
+                                Focus::Diff
+                            } else {
+                                Focus::Conversation
+                            };
+                        }
                     }
                     KeyCode::Char(c) => {
                         self.input.insert(self.cursor, c);
                         self.cursor += c.len_utf8();
                         self.history_index = None;
+                        self.update_autocomplete_options();
                     }
                     _ => {}
                 }
@@ -374,6 +413,8 @@ impl SimpleTui {
         self.remember_history(user_message.clone());
         self.input.clear();
         self.cursor = 0;
+        self.autocomplete_options.clear();
+        self.autocomplete_index = 0;
 
         let trimmed = user_message.trim();
         if trimmed.starts_with('/') {
@@ -447,6 +488,7 @@ impl SimpleTui {
         self.tool_calls_count = 0;
         self.start_time = Some(std::time::Instant::now());
         self.elapsed_seconds = 0;
+        self.token_used = 3000 + (task.len() / 4) as u32;
 
         self.add_entry(ConversationEntry::System(format!(
             "Starting task: {}",
@@ -519,6 +561,7 @@ impl SimpleTui {
         }
 
         // Drain character chunks from stream_queue to simulate streaming
+        let mut streamed = false;
         if !self.stream_queue.is_empty() {
             let take_count = self.stream_queue.len().min(8);
             let chunk: String = self.stream_queue.drain(0..take_count).collect();
@@ -527,36 +570,53 @@ impl SimpleTui {
             } else {
                 self.conversation.push(ConversationEntry::Assistant(chunk));
             }
+            self.scroll_offset = 0;
+            streamed = true;
         }
 
         // Drain everything currently queued so fast tool/diff bursts show up
         // within one frame instead of one-per-tick.
+        let mut received = false;
         loop {
             let Some(rx) = self.agent_rx.as_mut() else {
+                if streamed {
+                    self.update_token_count();
+                }
                 return;
             };
             match rx.try_recv() {
-                Ok(AgentUpdate::Progress(event)) => self.handle_loop_event(event),
+                Ok(AgentUpdate::Progress(event)) => {
+                    self.handle_loop_event(event);
+                    received = true;
+                }
                 Ok(AgentUpdate::Done { steps }) => {
                     self.add_entry(ConversationEntry::System(format!(
                         "Task complete in {} steps",
                         steps
                     )));
                     self.finish_agent_task();
+                    self.update_token_count();
                     return;
                 }
                 Ok(AgentUpdate::Error(e)) => {
                     self.add_entry(ConversationEntry::System(format!("Error: {}", e)));
                     self.finish_agent_task();
+                    self.update_token_count();
                     return;
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    if streamed || received {
+                        self.update_token_count();
+                    }
+                    return;
+                }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.add_entry(ConversationEntry::System(
                         "Agent task stopped unexpectedly".to_string(),
                     ));
                     self.agent_running = false;
                     self.agent_rx = None;
+                    self.update_token_count();
                     return;
                 }
             }
@@ -614,6 +674,9 @@ impl SimpleTui {
                     logs: truncate_for_display(&logs, 800),
                 });
             }
+            LoopEvent::TokensUsed { total, .. } => {
+                self.token_used = total;
+            }
         }
     }
 
@@ -635,10 +698,53 @@ impl SimpleTui {
 
     fn add_entry(&mut self, entry: ConversationEntry) {
         self.conversation.push(entry);
+        self.scroll_offset = 0;
     }
 
     fn has_draft(&self) -> bool {
         !self.input.trim().is_empty()
+    }
+
+    fn is_local_command(&self, input: &str) -> bool {
+        let trimmed = input.trim();
+        if trimmed.starts_with('/') {
+            if let Some(cmd) = SlashCommand::parse(trimmed) {
+                matches!(
+                    cmd,
+                    SlashCommand::Plan
+                        | SlashCommand::Help
+                        | SlashCommand::Theme { .. }
+                        | SlashCommand::Model { .. }
+                        | SlashCommand::Diff { .. }
+                )
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    fn update_token_count(&mut self) {
+        let mut conv_chars = 0;
+        for entry in &self.conversation {
+            match entry {
+                ConversationEntry::User(t) | ConversationEntry::Assistant(t) | ConversationEntry::System(t) => {
+                    conv_chars += t.len();
+                }
+                ConversationEntry::ToolCall { name, result } => {
+                    conv_chars += name.len() + result.len();
+                }
+                ConversationEntry::Diff { path, old_text, new_text } => {
+                    conv_chars += path.len() + old_text.len() + new_text.len();
+                }
+                ConversationEntry::VerifyResult { logs, .. } => {
+                    conv_chars += logs.len();
+                }
+            }
+        }
+        // Base system prompt and tools definitions take ~3000 tokens
+        self.token_used = 3000 + (conv_chars / 4) as u32;
     }
 
     fn previous_cursor_boundary(&self) -> usize {
@@ -883,24 +989,14 @@ impl SimpleTui {
         }
 
         // Main content area: Left (70%) and Right (30% for Agent Activity)
-        let show_panel = self._config.show_agent_panel;
-        let content_chunks = if show_panel {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(70), // Left side
-                    Constraint::Percentage(30), // Right side
-                ])
-                .split(main_chunks[1])
-        } else {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(100),
-                    Constraint::Percentage(0),
-                ])
-                .split(main_chunks[1])
-        };
+        // Main content area: Left side takes 100% width (Agent Activity panel removed YAGNI)
+        let content_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(100),
+                Constraint::Percentage(0),
+            ])
+            .split(main_chunks[1]);
 
         // Left side layout: Conversation, Diff (dynamic height), Input
         let diff_height = if self.diff_hunks.is_empty() { 0 } else { 8 };
@@ -914,36 +1010,65 @@ impl SimpleTui {
             .split(content_chunks[0]);
 
         // 1. Render Conversation history
-        let conversation_lines: Vec<Line> = self
-            .conversation
-            .iter()
-            .map(|entry| {
-                let (color, text) = match entry {
-                    ConversationEntry::User(text) => (Color::Cyan, format!("You: {}", text)),
-                    ConversationEntry::Assistant(text) => (Color::Green, format!("Forge: {}", text)),
-                    ConversationEntry::System(text) => (Color::Yellow, format!("System: {}", text)),
-                    ConversationEntry::ToolCall { name, result } => {
-                        (Color::Magenta, format!("[tool: {}] {}", name, result))
-                    }
-                    ConversationEntry::Diff { path, old_text, new_text } => {
-                        (Color::Yellow, format!("[diff: {}]\n- {}\n+ {}", path, old_text, new_text))
-                    }
-                    ConversationEntry::VerifyResult { passed, logs } => {
-                        let prefix = if *passed { "[✓ Passed]" } else { "[✗ Failed]" };
-                        let color = if *passed { Color::Green } else { Color::Red };
-                        (color, format!("{} {}", prefix, logs))
-                    }
+        let mut conversation_lines: Vec<Line> = Vec::new();
+        let mut in_code_block = false;
+
+        for entry in &self.conversation {
+            let base_color = match entry {
+                ConversationEntry::User(_) => Color::Cyan,
+                ConversationEntry::Assistant(_) => Color::Green,
+                ConversationEntry::System(_) => Color::Yellow,
+                ConversationEntry::ToolCall { .. } => Color::Magenta,
+                ConversationEntry::Diff { .. } => Color::Yellow,
+                ConversationEntry::VerifyResult { passed, .. } => if *passed { Color::Green } else { Color::Red },
+            };
+
+            let text = match entry {
+                ConversationEntry::User(text) => format!("You: {}", text),
+                ConversationEntry::Assistant(text) => format!("Forge: {}", text),
+                ConversationEntry::System(text) => format!("System: {}", text),
+                ConversationEntry::ToolCall { name, result } => format!("[tool: {}] {}", name, result),
+                ConversationEntry::Diff { path, old_text, new_text } => format!("[diff: {}]\n- {}\n+ {}", path, old_text, new_text),
+                ConversationEntry::VerifyResult { passed, logs } => {
+                    let prefix = if *passed { "[✓ Passed]" } else { "[✗ Failed]" };
+                    format!("{} {}", prefix, logs)
+                }
+            };
+
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("```") {
+                    in_code_block = !in_code_block;
+                    conversation_lines.push(Line::from(vec![Span::styled("  ────────────────────────────────────────", Style::default().fg(Color::DarkGray))]));
+                    continue;
+                }
+
+                let display_line = if in_code_block {
+                    format!("  │ {}", line)
+                } else {
+                    line.to_string()
                 };
-                Line::from(vec![Span::styled(text, Style::default().fg(color))])
-            })
-            .collect();
+
+                let line_color = if in_code_block {
+                    Color::White
+                } else {
+                    base_color
+                };
+
+                conversation_lines.push(Line::from(vec![Span::styled(display_line, Style::default().fg(line_color))]));
+            }
+        }
+
+        let chat_height = left_chunks[0].height.saturating_sub(2) as usize;
+        let max_scroll = conversation_lines.len().saturating_sub(chat_height);
+        let actual_scroll = (self.scroll_offset as usize).min(max_scroll);
 
         let visible_lines: Vec<Line> = conversation_lines
             .iter()
             .cloned()
             .rev()
-            .skip(self.scroll_offset as usize)
-            .take(left_chunks[0].height.saturating_sub(2) as usize)
+            .skip(actual_scroll)
+            .take(chat_height)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
@@ -1068,69 +1193,6 @@ impl SimpleTui {
             f.set_cursor(left_chunks[2].x + self.cursor as u16 + 1, left_chunks[2].y + 1);
         }
 
-        // 4. Render Agent Activity Panel (if enabled)
-        if show_panel {
-            let mut agent_lines = Vec::new();
-            agent_lines.push(Line::from(vec![Span::styled(
-                "Parallel Agents (1 active)",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            )]));
-            agent_lines.push(Line::from(""));
-
-            if let Some(task) = &self.active_agent_task {
-                let status_icon = if self.agent_running { "●" } else { "○" };
-                let status_color = if self.agent_running { Color::Blue } else { Color::Green };
-                agent_lines.push(Line::from(vec![
-                    Span::styled(status_icon, Style::default().fg(status_color)),
-                    Span::raw(" "),
-                    Span::styled("main", Style::default().fg(self.theme_fg())),
-                    Span::raw(": "),
-                    Span::styled(task, Style::default().fg(Color::Gray)),
-                ]));
-
-                if self.agent_running {
-                    let progress_bar = "████████░░░░░░░░░░░░";
-                    agent_lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(progress_bar, Style::default().fg(status_color)),
-                        Span::styled(" 40%", Style::default().fg(status_color)),
-                    ]));
-                }
-
-                agent_lines.push(Line::from(""));
-                agent_lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("Tool calls: {} | Elapsed: {}s", self.tool_calls_count, self.elapsed_seconds),
-                        Style::default().fg(Color::Gray),
-                    ),
-                ]));
-                agent_lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        format!("Status: {}", self.active_agent_status),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                ]));
-            } else {
-                agent_lines.push(Line::from(vec![Span::styled(
-                    "No active agent task",
-                    Style::default().fg(Color::Gray),
-                )]));
-            }
-
-            let agent_paragraph = Paragraph::new(agent_lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(self.theme_border(false)))
-                        .title("Agent Activity"),
-                )
-                .style(default_style)
-                .wrap(Wrap { trim: false });
-            f.render_widget(agent_paragraph, content_chunks[1]);
-        }
-
         // 5. Render Status Bar
         let mode_str = if self.plan_mode { "PLAN" } else { "BUILD" };
         let mode_color = if self.plan_mode { Color::Yellow } else { Color::Green };
@@ -1140,23 +1202,52 @@ impl SimpleTui {
             Focus::Conversation => "CHAT",
         };
         let status_color = if self.agent_running { Color::Yellow } else { Color::Green };
-        let status_str = if self.agent_running { "WORKING" } else { "READY" };
+        let status_str = if self.agent_running {
+            format!("WORKING ({})", self.active_agent_status)
+        } else {
+            "READY".to_string()
+        };
 
-        let line = Line::from(vec![
+        let mut status_spans = vec![
             Span::styled(" Mode: ", Style::default().fg(self.theme_fg())),
             Span::styled(mode_str, Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
             Span::raw(" │ Focus: "),
             Span::styled(focus_str, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(" │ Status: "),
             Span::styled(status_str, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        ];
+
+        if self.agent_running {
+            status_spans.push(Span::raw(" │ Time: "));
+            status_spans.push(Span::styled(format!("{}s", self.elapsed_seconds), Style::default().fg(Color::Yellow)));
+            status_spans.push(Span::raw(" │ Tools: "));
+            status_spans.push(Span::styled(self.tool_calls_count.to_string(), Style::default().fg(Color::Magenta)));
+        }
+
+        let ratio = if self.token_budget > 0 {
+            self.token_used as f32 / self.token_budget as f32
+        } else {
+            0.0
+        };
+        let token_color = if ratio < 0.5 {
+            Color::Green
+        } else if ratio < 0.8 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+
+        status_spans.extend(vec![
             Span::raw(" │ Queued: "),
             Span::styled(self.queued_messages.len().to_string(), Style::default().fg(self.theme_fg())),
             Span::raw(" │ Tokens: "),
             Span::styled(
                 format!("{}/{}", self.token_used, self.token_budget),
-                Style::default().fg(Color::Green),
+                Style::default().fg(token_color),
             ),
         ]);
+
+        let line = Line::from(status_spans);
         let status_bar = Paragraph::new(line)
             .style(Style::default().bg(Color::DarkGray).fg(Color::White));
         f.render_widget(status_bar, main_chunks[2]);
@@ -1164,37 +1255,92 @@ impl SimpleTui {
         self.render_autocomplete_popup(f, left_chunks[2]);
     }
 
+    fn update_autocomplete_options(&mut self) {
+        self.autocomplete_options.clear();
+        if !self.input.starts_with('/') {
+            self.autocomplete_index = 0;
+            return;
+        }
+
+        let input_trimmed = self.input.trim_start();
+        
+        let path_commands = ["/context add ", "/context remove ", "/diff ", "/review "];
+        let mut matched_cmd = None;
+        for cmd in &path_commands {
+            if input_trimmed.starts_with(cmd) {
+                matched_cmd = Some(*cmd);
+                break;
+            }
+        }
+
+        if let Some(cmd) = matched_cmd {
+            let path_part = &input_trimmed[cmd.len()..];
+            let (dir_path, prefix) = if let Some(last_slash) = path_part.rfind('/') {
+                (&path_part[..=last_slash], &path_part[last_slash + 1..])
+            } else {
+                ("", path_part)
+            };
+
+            let lookup_dir = if dir_path.is_empty() { "." } else { dir_path };
+            if let Ok(entries) = std::fs::read_dir(lookup_dir) {
+                let mut paths = Vec::new();
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with(prefix) && !name.starts_with('.') {
+                        let full_path = if dir_path.is_empty() {
+                            name
+                        } else {
+                            format!("{}{}", dir_path, name)
+                        };
+                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let suffix = if is_dir { "/" } else { "" };
+                        paths.push(format!("{}{}{}", cmd, full_path, suffix));
+                    }
+                }
+                paths.sort();
+                self.autocomplete_options = paths.into_iter().take(5).collect();
+            }
+        } else {
+            let commands = [
+                "/model ",
+                "/context add ",
+                "/context remove ",
+                "/context list",
+                "/agents list",
+                "/agents kill ",
+                "/resume ",
+                "/diff ",
+                "/plan",
+                "/review ",
+                "/init",
+                "/theme dark",
+                "/theme light",
+                "/theme safe",
+                "/help",
+            ];
+
+            let query = input_trimmed;
+            let mut filtered: Vec<String> = commands
+                .iter()
+                .filter(|cmd| cmd.starts_with(query))
+                .map(|s| s.to_string())
+                .collect();
+            filtered.sort();
+            self.autocomplete_options = filtered;
+        }
+
+        if self.autocomplete_index >= self.autocomplete_options.len() {
+            self.autocomplete_index = 0;
+        }
+    }
+
     fn render_autocomplete_popup(&self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        if !self.input.starts_with('/') || self.focus != Focus::Input {
+        if self.autocomplete_options.is_empty() || self.focus != Focus::Input {
             return;
         }
 
-        let query = &self.input;
-        let commands = [
-            "/model <name>",
-            "/context <add|remove|list> [path]",
-            "/agents <list|kill> [id]",
-            "/resume <task_id>",
-            "/diff [path]",
-            "/plan",
-            "/review [path]",
-            "/init",
-            "/theme <dark|light|safe>",
-            "/help",
-        ];
-
-        let filtered: Vec<&str> = commands
-            .iter()
-            .filter(|cmd| cmd.starts_with(query))
-            .copied()
-            .collect();
-
-        if filtered.is_empty() {
-            return;
-        }
-
-        let height = (filtered.len() + 2) as u16;
-        let width = 45;
+        let height = (self.autocomplete_options.len() + 2) as u16;
+        let width = 50;
         let popup_area = ratatui::layout::Rect {
             x: area.x + 1,
             y: area.y.saturating_sub(height),
@@ -1203,14 +1349,20 @@ impl SimpleTui {
         };
 
         let mut lines = Vec::new();
-        for cmd in filtered {
+        for (i, opt) in self.autocomplete_options.iter().enumerate() {
+            let is_selected = i == self.autocomplete_index;
+            let style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
             lines.push(Line::from(vec![
-                Span::styled(cmd, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                Span::styled(opt, style)
             ]));
         }
 
         let block = Block::default()
-            .title("Commands")
+            .title("Suggestions [Tab to select, Up/Down to navigate]")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
 
@@ -1239,6 +1391,7 @@ mod tests {
             Ok(ChatResponse {
                 content: "done".to_string(),
                 tool_calls: vec![],
+                usage: None,
             })
         }
 
@@ -1372,5 +1525,63 @@ mod tests {
         } else {
             panic!("Expected Assistant entry");
         }
+    }
+
+    #[tokio::test]
+    async fn test_autocomplete_enter_and_tab() {
+        let mut tui = test_tui();
+        tui.input = "/pl".to_string();
+        tui.cursor = tui.input.len();
+        tui.update_autocomplete_options();
+
+        assert!(!tui.autocomplete_options.is_empty());
+        assert_eq!(tui.autocomplete_options[tui.autocomplete_index], "/plan");
+
+        // Pressing Enter on complete command (no trailing space/slash) should execute it immediately
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+        
+        assert!(tui.plan_mode); // /plan toggles plan mode
+        assert!(tui.input.is_empty());
+        assert!(tui.autocomplete_options.is_empty());
+
+        // Pressing Enter on incomplete command (trailing space) should NOT execute it
+        tui.input = "/model".to_string();
+        tui.cursor = tui.input.len();
+        tui.update_autocomplete_options();
+        
+        // Find "/model " (ends with space)
+        if let Some(pos) = tui.autocomplete_options.iter().position(|opt| opt == "/model ") {
+            tui.autocomplete_index = pos;
+        }
+        
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+        assert_eq!(tui.input, "/model ");
+        assert_eq!(tui.cursor, "/model ".len());
+        // Since it ends with space, plan mode or model changes are not processed (input stays /model )
+        assert!(tui.plan_mode); // remains toggled from before
+    }
+
+    #[tokio::test]
+    async fn test_agent_running_allows_local_commands() {
+        let mut tui = test_tui();
+        tui.agent_running = true;
+
+        // /plan is a local command, so it should NOT be queued
+        tui.input = "/plan".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+        
+        assert!(tui.plan_mode); // plan mode toggled immediately
+        assert!(tui.queued_messages.is_empty()); // not queued
+
+        // Normal text should still be queued
+        tui.input = "normal prompt".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+        assert_eq!(tui.queued_messages, vec!["normal prompt".to_string()]); // queued!
     }
 }

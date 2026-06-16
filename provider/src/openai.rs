@@ -23,6 +23,14 @@ pub struct OpenAIProvider {
 #[derive(Debug, Deserialize)]
 struct OpenAIResponse {
     choices: Vec<OpenAIChoice>,
+    usage: Option<OpenAIUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,9 +122,16 @@ impl OpenAIProvider {
             })
             .collect();
 
+        let usage = openai_response.usage.map(|u| crate::types::TokenUsage {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        });
+
         Ok(ChatResponse {
             content: message.content.clone().unwrap_or_default(),
             tool_calls,
+            usage,
         })
     }
 }

@@ -20,6 +20,13 @@ pub struct AnthropicProvider {
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
     content: Vec<AnthropicContent>,
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: u32,
+    output_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,9 +141,16 @@ impl ModelProvider for AnthropicProvider {
             }
         }
 
+        let usage = anthropic_response.usage.map(|u| crate::types::TokenUsage {
+            prompt_tokens: u.input_tokens,
+            completion_tokens: u.output_tokens,
+            total_tokens: u.input_tokens + u.output_tokens,
+        });
+
         Ok(ChatResponse {
             content: content_parts.join("\n"),
             tool_calls,
+            usage,
         })
     }
 

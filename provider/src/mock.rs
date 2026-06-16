@@ -33,6 +33,7 @@ impl MockProvider {
             terminal: ChatResponse {
                 content: "Mock provider: task acknowledged. No changes were made.".to_string(),
                 tool_calls: Vec::new(),
+                usage: None,
             },
         }
     }
@@ -84,6 +85,7 @@ mod tests {
                 name: "read_file".into(),
                 arguments: HashMap::new(),
             }],
+            usage: None,
         }];
         let provider = MockProvider::scripted("local", scripted);
 

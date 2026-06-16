@@ -21,6 +21,18 @@ pub struct GeminiProvider {
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
     candidates: Vec<GeminiCandidate>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiUsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: u32,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: u32,
+    #[serde(rename = "totalTokenCount")]
+    total_token_count: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,9 +124,16 @@ impl GeminiProvider {
             })
             .collect();
 
+        let usage = gemini_response.usage_metadata.map(|u| crate::types::TokenUsage {
+            prompt_tokens: u.prompt_token_count,
+            completion_tokens: u.candidates_token_count,
+            total_tokens: u.total_token_count,
+        });
+
         Ok(ChatResponse {
             content,
             tool_calls,
+            usage,
         })
     }
 }

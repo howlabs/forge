@@ -70,6 +70,7 @@ pub struct ToolResponse {
 pub struct ChatResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    pub usage: Option<TokenUsage>,
 }
 
 /// Streaming event from a chat stream

@@ -351,6 +351,12 @@ pub enum LoopEvent {
     },
     /// A verify run completed.
     VerifyResult { passed: bool, logs: String },
+    /// Token usage reported by the provider.
+    TokensUsed {
+        prompt: u32,
+        completion: u32,
+        total: u32,
+    },
 }
 
 /// Best-effort sender for [`LoopEvent`]s.
@@ -590,6 +596,14 @@ impl<P: ModelProvider> EventLoop<P> {
             self.steps += 1;
 
             let _ = self.save_checkpoint();
+
+            if let Some(usage) = &response.usage {
+                self.emit(LoopEvent::TokensUsed {
+                    prompt: usage.prompt_tokens,
+                    completion: usage.completion_tokens,
+                    total: usage.total_tokens,
+                });
+            }
 
             if !response.content.is_empty() {
                 self.emit(LoopEvent::AssistantMessage {
@@ -973,6 +987,7 @@ mod tests {
         provider::ChatResponse {
             content: content.to_string(),
             tool_calls,
+            usage: None,
         }
     }
 

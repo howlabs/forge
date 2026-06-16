@@ -179,6 +179,10 @@ where
                     println!("→ tool: {name}");
                     continue;
                 }
+                LoopEvent::TokensUsed { prompt, completion, total } => {
+                    println!("ℹ tokens: {total} ({prompt} prompt, {completion} completion)");
+                    continue;
+                }
                 LoopEvent::ToolCompleted {
                     name,
                     result,
