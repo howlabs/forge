@@ -449,7 +449,7 @@ fn check_sandbox_config(config: Option<&DoctorToml>, requested_network: &str) ->
         if !matches!(net_lower.as_str(), "off" | "on" | "restricted" | "full" | "auto") {
             status = Status::Fail;
             notes.push(format!("[sandbox].network='{net}' is not a recognized mode"));
-        } else if !same_network(&net_lower, requested_network) {
+        } else if !same_network(&net_lower, &requested_network.to_lowercase()) {
             status = Status::Warn;
             notes.push(format!(
                 "[sandbox].network='{net}' differs from --network='{requested_network}'"

@@ -246,10 +246,11 @@ async fn attach_mcp_servers<P: provider::ModelProvider>(
                 event_loop = updated;
             }
             Err(e) => {
-                tracing::warn!("Failed to connect MCP server '{}': {}", label, e);
-                return Err(e).with_context(|| {
-                    format!("failed to connect configured MCP server '{label}'")
-                });
+                tracing::warn!(
+                    "Failed to connect MCP server '{}': {} — skipping",
+                    label,
+                    e
+                );
             }
         }
     }
