@@ -39,7 +39,7 @@ impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             fullscreen: false, // Hybrid mode by default
-            show_agent_panel: true,
+            show_agent_panel: false,
             theme: Theme::default(),
         }
     }
@@ -92,7 +92,7 @@ mod tests {
     fn test_config_default() {
         let config = TuiConfig::default();
         assert!(!config.fullscreen);
-        assert!(config.show_agent_panel);
+        assert!(!config.show_agent_panel);
     }
 
     #[test]

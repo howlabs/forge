@@ -2851,20 +2851,20 @@ mod tests {
     async fn test_yoga_layout_toggling_and_resizing() {
         let mut tui = test_tui();
         
-        // Default: show_agent_panel is true (from config)
-        assert!(tui.show_agent_panel);
+        // Default: show_agent_panel is false (from config)
+        assert!(!tui.show_agent_panel);
         
         // Toggle via Ctrl-P keybinding
         tui.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
-        assert!(!tui.show_agent_panel);
+        assert!(tui.show_agent_panel);
         
         // Toggle via slash command /agents toggle
         tui.input = "/agents toggle".to_string();
         tui.cursor = tui.input.len();
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
-        assert!(tui.show_agent_panel);
+        assert!(!tui.show_agent_panel);
 
         // Verify focus state adjustments for Diff height
         tui.diff_hunks = vec![DiffHunk {
