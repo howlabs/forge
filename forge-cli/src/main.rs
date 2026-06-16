@@ -380,8 +380,8 @@ async fn main() -> Result<()> {
                         println!("No agents found.");
                     } else {
                         println!(
-                            "{:<12} {:<10} {:<40} {}",
-                            "ID", "STATUS", "PROMPT", "RESULT"
+                            "{:<12} {:<10} {:<40} RESULT",
+                            "ID", "STATUS", "PROMPT"
                         );
                         println!("{}", "-".repeat(80));
                         for t in &tasks {

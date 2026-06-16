@@ -595,7 +595,7 @@ fn check_mcp_config(config: Option<&DoctorToml>) -> Check {
         .filter(|(_, v)| {
             v.get("command")
                 .and_then(|c| c.as_str())
-                .map_or(true, |s| s.is_empty())
+                .is_none_or(|s| s.is_empty())
         })
         .map(|(k, _)| k.to_string())
         .collect();
