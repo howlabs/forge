@@ -112,16 +112,17 @@ pub fn run(config: &DoctorConfig) -> i32 {
 pub fn gather(config: &DoctorConfig) -> Vec<Check> {
     let forge_toml = load_doctor_toml(&config.config_path);
 
-    let mut checks = Vec::new();
-    checks.push(check_toolchain());
-    checks.push(check_git(&config.project_path));
-    checks.push(check_network_mode(&config.network));
-    checks.push(check_network_sandbox(&config.network));
-    checks.push(check_config(&config.config_path));
-    checks.push(check_configured_provider(forge_toml.as_ref()));
-    checks.push(check_sandbox_config(forge_toml.as_ref(), &config.network));
-    checks.push(check_verify_config(forge_toml.as_ref()));
-    checks.push(check_mcp_config(forge_toml.as_ref()));
+    let mut checks = vec![
+        check_toolchain(),
+        check_git(&config.project_path),
+        check_network_mode(&config.network),
+        check_network_sandbox(&config.network),
+        check_config(&config.config_path),
+        check_configured_provider(forge_toml.as_ref()),
+        check_sandbox_config(forge_toml.as_ref(), &config.network),
+        check_verify_config(forge_toml.as_ref()),
+        check_mcp_config(forge_toml.as_ref()),
+    ];
     checks.extend(check_provider_keys());
     checks
 }
@@ -595,7 +596,7 @@ fn check_mcp_config(config: Option<&DoctorToml>) -> Check {
         .filter(|(_, v)| {
             v.get("command")
                 .and_then(|c| c.as_str())
-                .map_or(true, |s| s.is_empty())
+                .is_none_or(|s| s.is_empty())
         })
         .map(|(k, _)| k.to_string())
         .collect();

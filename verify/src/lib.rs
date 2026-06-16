@@ -12,7 +12,7 @@ pub mod verifier;
 
 // Re-export implementations
 pub use checkpoint_store::FileCheckpointStore;
-pub use verifier::BuildVerifier;
+pub use verifier::{detect_verify_commands, resolve_verify_commands, BuildVerifier};
 
 // Re-export shared types and traits from forge-agents
 pub use agents::{Checkpoint, Task, TaskStatus, VerifyReport};

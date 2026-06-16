@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod catalog;
 pub mod gemini;
 pub mod mock;
 pub mod openai;
@@ -6,6 +7,7 @@ pub mod traits;
 pub mod types;
 
 pub use anthropic::AnthropicProvider;
+pub use catalog::{default_model, list_models, ModelCapability, ModelInfo, MODEL_CATALOG};
 pub use gemini::GeminiProvider;
 pub use mock::MockProvider;
 pub use openai::OpenAIProvider;
