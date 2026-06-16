@@ -87,8 +87,8 @@ impl SlashCommand {
             "theme" if parts.len() > 1 => SlashCommand::Theme {
                 theme: parts[1].to_string(),
             },
-            "connect" if parts.len() > 1 => SlashCommand::Connect {
-                provider: parts[1].to_string(),
+            "connect" => SlashCommand::Connect {
+                provider: parts.get(1).map(|s| s.to_string()).unwrap_or_default(),
                 model: parts.get(2).map(|s| s.to_string()),
                 api_key: parts.get(3).map(|s| s.to_string()),
             },

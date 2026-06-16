@@ -63,6 +63,23 @@ pub struct PendingApproval {
     pub tx: tokio::sync::oneshot::Sender<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectPopupField {
+    Provider,
+    Model,
+    ApiKey,
+}
+
+pub struct ConnectPopupState {
+    pub active: bool,
+    pub providers: Vec<String>,
+    pub selected_provider_idx: usize,
+    pub models: Vec<String>,
+    pub selected_model_idx: usize,
+    pub api_key: String,
+    pub active_field: ConnectPopupField,
+}
+
 enum AgentUpdate {
     /// A live progress event from the running event loop.
     Progress(forge_core::LoopEvent),
@@ -128,6 +145,7 @@ pub struct SimpleTui {
     autocomplete_options: Vec<String>,
     autocomplete_index: usize,
     did_stream_chunk: bool,
+    connect_popup: ConnectPopupState,
 }
 
 fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> String {
@@ -188,6 +206,28 @@ impl SimpleTui {
             autocomplete_options: Vec::new(),
             autocomplete_index: 0,
             did_stream_chunk: false,
+            connect_popup: {
+                let mut providers = vec![
+                    "anthropic".to_string(),
+                    "gemini".to_string(),
+                    "mock".to_string(),
+                ];
+                for p in provider::PROVIDERS {
+                    providers.push(p.name.to_string());
+                }
+                providers.sort();
+                providers.dedup();
+                
+                ConnectPopupState {
+                    active: false,
+                    providers,
+                    selected_provider_idx: 0,
+                    models: Vec::new(),
+                    selected_model_idx: 0,
+                    api_key: String::new(),
+                    active_field: ConnectPopupField::Provider,
+                }
+            },
         }
     }
 
@@ -200,6 +240,21 @@ impl SimpleTui {
     pub fn with_auto_resume(mut self, task_id: Option<String>) -> Self {
         self.auto_resume_task = task_id;
         self
+    }
+
+    fn update_connect_popup_models(&mut self) {
+        let provider = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
+        let mut models: Vec<String> = provider::MODEL_CATALOG.iter()
+            .filter(|m| m.provider == provider)
+            .map(|m| m.model.to_string())
+            .collect();
+            
+        if models.is_empty() {
+            models.push("default".to_string());
+        }
+        
+        self.connect_popup.models = models;
+        self.connect_popup.selected_model_idx = 0;
     }
 
     /// Run the TUI
@@ -261,6 +316,114 @@ impl SimpleTui {
 
     /// Handle keyboard events
     async fn handle_key_event(&mut self, key: KeyEvent) {
+        // Handle connect popup key interception
+        if self.connect_popup.active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.connect_popup.active = false;
+                    self.add_entry(ConversationEntry::System("Interactive connection cancelled.".to_string()));
+                }
+                KeyCode::Tab => {
+                    self.connect_popup.active_field = match self.connect_popup.active_field {
+                        ConnectPopupField::Provider => ConnectPopupField::Model,
+                        ConnectPopupField::Model => ConnectPopupField::ApiKey,
+                        ConnectPopupField::ApiKey => ConnectPopupField::Provider,
+                    };
+                }
+                KeyCode::BackTab => {
+                    self.connect_popup.active_field = match self.connect_popup.active_field {
+                        ConnectPopupField::Provider => ConnectPopupField::ApiKey,
+                        ConnectPopupField::Model => ConnectPopupField::Provider,
+                        ConnectPopupField::ApiKey => ConnectPopupField::Model,
+                    };
+                }
+                KeyCode::Up => {
+                    match self.connect_popup.active_field {
+                        ConnectPopupField::Provider => {
+                            if self.connect_popup.selected_provider_idx > 0 {
+                                self.connect_popup.selected_provider_idx -= 1;
+                                self.update_connect_popup_models();
+                                let p = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
+                                self.connect_popup.api_key = resolve_api_key(p, None);
+                            }
+                        }
+                        ConnectPopupField::Model => {
+                            if self.connect_popup.selected_model_idx > 0 {
+                                self.connect_popup.selected_model_idx -= 1;
+                            }
+                        }
+                        ConnectPopupField::ApiKey => {}
+                    }
+                }
+                KeyCode::Down => {
+                    match self.connect_popup.active_field {
+                        ConnectPopupField::Provider => {
+                            if self.connect_popup.selected_provider_idx + 1 < self.connect_popup.providers.len() {
+                                self.connect_popup.selected_provider_idx += 1;
+                                self.update_connect_popup_models();
+                                let p = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
+                                self.connect_popup.api_key = resolve_api_key(p, None);
+                            }
+                        }
+                        ConnectPopupField::Model => {
+                            if self.connect_popup.selected_model_idx + 1 < self.connect_popup.models.len() {
+                                self.connect_popup.selected_model_idx += 1;
+                            }
+                        }
+                        ConnectPopupField::ApiKey => {}
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if self.connect_popup.active_field == ConnectPopupField::ApiKey {
+                        self.connect_popup.api_key.push(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if self.connect_popup.active_field == ConnectPopupField::ApiKey {
+                        self.connect_popup.api_key.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    let provider = self.connect_popup.providers[self.connect_popup.selected_provider_idx].clone();
+                    let model = self.connect_popup.models.get(self.connect_popup.selected_model_idx)
+                        .cloned()
+                        .unwrap_or_else(|| "default".to_string());
+                    let key = self.connect_popup.api_key.clone();
+                    
+                    self.connect_popup.active = false;
+                    
+                    let key_resolved = if key.is_empty() {
+                        resolve_api_key(&provider, None)
+                    } else {
+                        key
+                    };
+                    
+                    if key_resolved.is_empty() && provider != "mock" {
+                        self.add_entry(ConversationEntry::System(format!(
+                            "Error: No API key resolved for provider '{}'.", provider
+                        )));
+                    } else {
+                        match provider::create_provider(&provider, &model, &key_resolved) {
+                            Ok(new_provider) => {
+                                self.provider = new_provider;
+                                self.add_entry(ConversationEntry::System(format!(
+                                    "Successfully connected to provider '{}' using model '{}'!",
+                                    provider, model
+                                )));
+                            }
+                            Err(e) => {
+                                self.add_entry(ConversationEntry::System(format!(
+                                    "Failed to connect to provider '{}': {}", provider, e
+                                )));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Handle pending interactive approval first
         if let Some(pending) = self.pending_approval.take() {
             match key.code {
@@ -568,33 +731,46 @@ impl SimpleTui {
                         }
                     }
                     SlashCommand::Connect { provider, model, api_key } => {
-                        let provider_lower = provider.to_lowercase();
-                        let resolved_model = model.clone().unwrap_or_else(|| {
-                            provider::default_model(&provider_lower)
-                                .map(|m| m.model.to_string())
-                                .unwrap_or_else(|| "default".to_string())
-                        });
-                        
-                        let key = resolve_api_key(&provider_lower, api_key);
-                        if key.is_empty() && provider_lower != "mock" {
-                            self.add_entry(ConversationEntry::System(format!(
-                                "Error: No API key resolved for provider '{}'. Please pass it or set the environment variable.",
-                                provider
-                            )));
+                        if provider.is_empty() {
+                            self.connect_popup.active = true;
+                            self.connect_popup.active_field = ConnectPopupField::Provider;
+                            self.connect_popup.selected_provider_idx = 0;
+                            self.connect_popup.selected_model_idx = 0;
+                            self.update_connect_popup_models();
+                            let default_provider = &self.connect_popup.providers[0];
+                            self.connect_popup.api_key = resolve_api_key(default_provider, None);
+                            self.add_entry(ConversationEntry::System(
+                                "Opened interactive Connect Selector. Press [Tab] to switch fields, [Up/Down] to select, [Enter] to connect, [Esc] to close.".to_string()
+                            ));
                         } else {
-                            match provider::create_provider(&provider_lower, &resolved_model, &key) {
-                                Ok(new_provider) => {
-                                    self.provider = new_provider;
-                                    self.add_entry(ConversationEntry::System(format!(
-                                        "Successfully connected to provider '{}' using model '{}'!",
-                                        provider, resolved_model
-                                    )));
-                                }
-                                Err(e) => {
-                                    self.add_entry(ConversationEntry::System(format!(
-                                        "Failed to connect to provider '{}': {}",
-                                        provider, e
-                                    )));
+                            let provider_lower = provider.to_lowercase();
+                            let resolved_model = model.clone().unwrap_or_else(|| {
+                                provider::default_model(&provider_lower)
+                                    .map(|m| m.model.to_string())
+                                    .unwrap_or_else(|| "default".to_string())
+                            });
+                            
+                            let key = resolve_api_key(&provider_lower, api_key);
+                            if key.is_empty() && provider_lower != "mock" {
+                                self.add_entry(ConversationEntry::System(format!(
+                                    "Error: No API key resolved for provider '{}'. Please pass it or set the environment variable.",
+                                    provider
+                                )));
+                            } else {
+                                match provider::create_provider(&provider_lower, &resolved_model, &key) {
+                                    Ok(new_provider) => {
+                                        self.provider = new_provider;
+                                        self.add_entry(ConversationEntry::System(format!(
+                                            "Successfully connected to provider '{}' using model '{}'!",
+                                            provider, resolved_model
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        self.add_entry(ConversationEntry::System(format!(
+                                            "Failed to connect to provider '{}': {}",
+                                            provider, e
+                                        )));
+                                    }
                                 }
                             }
                         }
@@ -1470,6 +1646,129 @@ impl SimpleTui {
         f.render_widget(status_bar, main_chunks[2]);
 
         self.render_autocomplete_popup(f, left_chunks[2]);
+        self.render_connect_popup(f);
+    }
+
+    fn render_connect_popup(&self, f: &mut ratatui::Frame) {
+        if !self.connect_popup.active {
+            return;
+        }
+        
+        let size = f.size();
+        let popup_area = {
+            let width = 60.min(size.width);
+            let height = 18.min(size.height);
+            let x = (size.width - width) / 2;
+            let y = (size.height - height) / 2;
+            let Rect = ratatui::layout::Rect::new(x, y, width, height);
+            Rect
+        };
+        
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+        
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .title("🔌  Multi-Provider Connector (OpenCode Style) ");
+            
+        f.render_widget(block, popup_area);
+        
+        let inner_area = popup_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 2 });
+        
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(8), // Providers & Models row
+                Constraint::Length(3), // API Key input
+                Constraint::Min(2),    // Instructions
+            ])
+            .split(inner_area);
+            
+        let row_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50), // Providers
+                Constraint::Percentage(50), // Models
+            ])
+            .split(chunks[0]);
+            
+        // 1. Render Providers List
+        let provider_border_style = if self.connect_popup.active_field == ConnectPopupField::Provider {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let mut provider_spans = Vec::new();
+        for (idx, p) in self.connect_popup.providers.iter().enumerate() {
+            let prefix = if idx == self.connect_popup.selected_provider_idx { "▶ " } else { "  " };
+            let style = if idx == self.connect_popup.selected_provider_idx {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            provider_spans.push(Line::from(vec![
+                Span::styled(format!("{prefix}{p}"), style)
+            ]));
+        }
+        let provider_list = Paragraph::new(provider_spans)
+            .block(Block::default().borders(Borders::ALL).border_style(provider_border_style).title(" 1. Provider "));
+        f.render_widget(provider_list, row_chunks[0]);
+        
+        // 2. Render Models List
+        let model_border_style = if self.connect_popup.active_field == ConnectPopupField::Model {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let mut model_spans = Vec::new();
+        for (idx, m) in self.connect_popup.models.iter().enumerate() {
+            let prefix = if idx == self.connect_popup.selected_model_idx { "▶ " } else { "  " };
+            let style = if idx == self.connect_popup.selected_model_idx {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            model_spans.push(Line::from(vec![
+                Span::styled(format!("{prefix}{m}"), style)
+            ]));
+        }
+        let model_list = Paragraph::new(model_spans)
+            .block(Block::default().borders(Borders::ALL).border_style(model_border_style).title(" 2. Model "));
+        f.render_widget(model_list, row_chunks[1]);
+        
+        // 3. Render Api Key Field
+        let api_key_border_style = if self.connect_popup.active_field == ConnectPopupField::ApiKey {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let api_key_display = if self.connect_popup.api_key.is_empty() {
+            " (Using env var fallback or mock) ".to_string()
+        } else {
+            "*".repeat(self.connect_popup.api_key.len())
+        };
+        let api_key_paragraph = Paragraph::new(api_key_display)
+            .block(Block::default().borders(Borders::ALL).border_style(api_key_border_style).title(" 3. API Key (Press tab to edit) "));
+        f.render_widget(api_key_paragraph, chunks[1]);
+        
+        // 4. Render Instructions
+        let instructions = vec![
+            Line::from(vec![
+                Span::raw(" Nav: "),
+                Span::styled("[Tab]/[Shift-Tab]", Style::default().fg(Color::Yellow)),
+                Span::raw(" │ Select: "),
+                Span::styled("[Up/Down]", Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::raw(" Connect: "),
+                Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::raw(" │ Cancel: "),
+                Span::styled("[Esc]", Style::default().fg(Color::Red)),
+            ])
+        ];
+        let instructions_paragraph = Paragraph::new(instructions)
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(instructions_paragraph, chunks[2]);
     }
 
     fn update_autocomplete_options(&mut self) {
@@ -1955,5 +2254,48 @@ mod tests {
             .await;
             
         assert_eq!(tui.provider.model(), "mock-model");
+    }
+
+    #[tokio::test]
+    async fn test_interactive_connect_popup_navigation() {
+        let mut tui = test_tui();
+        
+        // Execute /connect without args to open the popup
+        tui.input = "/connect".to_string();
+        tui.cursor = tui.input.len();
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+            
+        assert!(tui.connect_popup.active);
+        assert_eq!(tui.connect_popup.active_field, ConnectPopupField::Provider);
+        
+        // Switch field to Model
+        tui.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()))
+            .await;
+        assert_eq!(tui.connect_popup.active_field, ConnectPopupField::Model);
+        
+        // Switch field to ApiKey
+        tui.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()))
+            .await;
+        assert_eq!(tui.connect_popup.active_field, ConnectPopupField::ApiKey);
+        
+        // Type some keys for API key
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()))
+            .await;
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()))
+            .await;
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
+            .await;
+        assert_eq!(tui.connect_popup.api_key, "key");
+        
+        // Backspace
+        tui.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()))
+            .await;
+        assert_eq!(tui.connect_popup.api_key, "ke");
+        
+        // Escape cancels
+        tui.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        assert!(!tui.connect_popup.active);
     }
 }
