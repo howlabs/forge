@@ -9,6 +9,16 @@ Forge follows [Semantic Versioning](https://semver.org/) using `MAJOR.MINOR.PATC
 ### Added
 
 - Versioning policy based on Semantic Versioning.
+- `ponytail` plugin install: real upstream `DietrichGebert/ponytail@4.7.0`
+  ruleset shipped as a Forge skill (`ext/tests/fixtures/skills/ponytail.md`)
+  + plugin manifest (`ext/tests/fixtures/plugins/ponytail/forge-plugin.toml`).
+  `ext::skills::SkillDiscovery` and `ext::plugins::{PluginLoader,
+  PluginRegistry}` now have a live install to round-trip against. Mirrored
+  to `~/.forge/skills/ponytail.md` and `~/.forge/plugins/ponytail/` for
+  end-user discovery.
+- `ext/tests/ponytail_install.rs` — 6 integration tests that fail loud
+  if upstream ever drops YAGNI / stdlib-first / lazy-senior persona, or if
+  the Forge skill or plugin loader regresses on the install.
 
 ### Changed
 

@@ -1,0 +1,15 @@
+name = "ponytail"
+version = "4.7.0"
+description = "Lazy senior dev mode for AI agents. Forces the simplest, shortest solution that actually works: YAGNI, stdlib first, no unrequested abstractions. Channels a senior dev with a ponytail who has been at the company longer than the version control."
+keywords = ["minimalism", "yagni", "code-review", "lazy", "minimal"]
+provides_prompts = ["ponytail"]
+provides_tools = []
+provides_resources = []
+hooks = []
+
+[metadata]
+author = "Dietrich Gebert"
+homepage = "https://github.com/DietrichGebert/ponytail"
+repository = "https://github.com/DietrichGebert/ponytail"
+license = "MIT"
+installed_at = "2026-06-17T07:00:00Z"
