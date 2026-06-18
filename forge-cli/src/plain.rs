@@ -193,7 +193,11 @@ where
                     println!("→ tool: {name}");
                     continue;
                 }
-                LoopEvent::TokensUsed { prompt, completion, total } => {
+                LoopEvent::TokensUsed {
+                    prompt,
+                    completion,
+                    total,
+                } => {
                     println!("ℹ tokens: {total} ({prompt} prompt, {completion} completion)");
                     continue;
                 }
@@ -254,8 +258,7 @@ where
         String::new()
     };
 
-    let mut event_loop =
-        EventLoop::new(provider, context, sandbox, initial_task).with_observer(tx);
+    let mut event_loop = EventLoop::new(provider, context, sandbox, initial_task).with_observer(tx);
 
     if cfg.resume_task.is_some() {
         let policy = {

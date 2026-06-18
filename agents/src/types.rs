@@ -128,6 +128,21 @@ impl VerifyReport {
     }
 }
 
+/// Crash recovery payload stored inside a checkpoint file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CheckpointState {
+    pub history: Vec<serde_json::Value>,
+    pub worktree_refs: Vec<String>,
+    pub last_verify: Option<LastVerify>,
+}
+
+/// Last verify result recorded in a checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LastVerify {
+    pub passed: bool,
+    pub logs: String,
+}
+
 /// Crash recovery state for long-horizon tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -135,15 +150,15 @@ pub struct Checkpoint {
     pub task_id: String,
     /// Step number within the task
     pub step: u32,
-    /// Serialized state (bincode or JSON)
-    pub state: Vec<u8>,
+    /// Structured event-loop state
+    pub state: CheckpointState,
     /// When this checkpoint was created
     pub timestamp: SystemTime,
 }
 
 impl Checkpoint {
     /// Create a new checkpoint
-    pub fn new(task_id: impl Into<String>, step: u32, state: Vec<u8>) -> Self {
+    pub fn new(task_id: impl Into<String>, step: u32, state: CheckpointState) -> Self {
         Self {
             task_id: task_id.into(),
             step,
@@ -196,10 +211,18 @@ mod tests {
 
     #[test]
     fn test_checkpoint_creation() {
-        let checkpoint = Checkpoint::new("task-123", 5, vec![1, 2, 3]);
+        let checkpoint = Checkpoint::new(
+            "task-123",
+            5,
+            CheckpointState {
+                history: vec![serde_json::json!({"role": "user", "content": "hi"})],
+                worktree_refs: vec!["/tmp/wt".into()],
+                last_verify: None,
+            },
+        );
         assert_eq!(checkpoint.task_id, "task-123");
         assert_eq!(checkpoint.step, 5);
-        assert_eq!(checkpoint.state, vec![1, 2, 3]);
+        assert_eq!(checkpoint.state.worktree_refs, vec!["/tmp/wt"]);
     }
 
     #[test]

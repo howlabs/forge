@@ -130,6 +130,8 @@ impl TuiApp {
                             self.handle_key_event(key);
                         }
                     }
+                    // ponytail: reveal a few stream chars per tick for live typing effect
+                    self.panels.conversation.drain_stream_tick(8);
                 }
             }
 
@@ -145,7 +147,7 @@ impl TuiApp {
         match event {
             AppEvent::KeyEvent(key) => self.handle_key_event(key),
             AppEvent::StreamContent(content) => {
-                self.panels.conversation.add_content(content);
+                self.panels.conversation.push_stream_delta(&content);
             }
             AppEvent::AgentStatusUpdate { id, status } => {
                 self.panels.agent_panel.update_status(id, status);

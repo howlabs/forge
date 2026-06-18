@@ -31,6 +31,8 @@ pub struct TuiConfig {
     pub fullscreen: bool,
     /// Enable/disable agent activity panel
     pub show_agent_panel: bool,
+    /// Auto-approve all write/run tools without prompting
+    pub yolo: bool,
     /// Theme color scheme
     pub theme: Theme,
 }
@@ -40,6 +42,7 @@ impl Default for TuiConfig {
         Self {
             fullscreen: false, // Hybrid mode by default
             show_agent_panel: false,
+            yolo: false,
             theme: Theme::default(),
         }
     }

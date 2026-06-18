@@ -58,4 +58,3 @@ impl<T: ModelProvider + ?Sized> ModelProvider for Arc<T> {
         (**self).chat_stream(messages).await
     }
 }
-

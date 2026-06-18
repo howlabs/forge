@@ -77,6 +77,10 @@ enum Commands {
         /// Force plain mode even when in TTY
         #[arg(long, default_value_t = false)]
         plain: bool,
+
+        /// Auto-approve all file edits and shell commands (skip approval gate)
+        #[arg(long, default_value_t = false)]
+        yolo: bool,
     },
     /// Headless exec mode for CI/CD
     Exec {
@@ -201,6 +205,16 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// View structured trace logs
+    Logs {
+        /// Show the quick summary of the last run
+        #[arg(long, default_value_t = false)]
+        last: bool,
+
+        /// Path to the project directory
+        #[arg(short, long, default_value = ".")]
+        project_path: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -321,11 +335,36 @@ enum AgentAction {
     },
 }
 
+fn init_tracing() -> Result<()> {
+    use tracing_subscriber::prelude::*;
+
+    let logs_dir = std::path::Path::new(".forge/logs");
+    let _ = std::fs::create_dir_all(logs_dir);
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(logs_dir.join("trace.jsonl"))?;
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_writer(log_file);
+
+    let console_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(EnvFilter::from_default_env());
+
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer)
+        .init();
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    let _ = init_tracing();
 
     let cli = Cli::parse();
 
@@ -342,6 +381,7 @@ async fn main() -> Result<()> {
             session,
             tui,
             plain,
+            yolo,
         } => {
             tracing::info!("Forge v{} starting (REPL mode)", env!("CARGO_PKG_VERSION"));
 
@@ -389,6 +429,7 @@ async fn main() -> Result<()> {
                     sandbox,
                     project_path,
                     resume,
+                    yolo,
                 )
                 .await?;
             } else {
@@ -633,7 +674,76 @@ async fn main() -> Result<()> {
             })?;
             std::process::exit(exit_code);
         }
+        Commands::Logs { last, project_path } => {
+            if last {
+                show_last_log(&project_path)?;
+            } else {
+                println!("Usage: forge logs --last");
+            }
+            Ok(())
+        }
     }
+}
+
+fn show_last_log(project_path: &str) -> Result<()> {
+    let logs_file = std::path::Path::new(project_path).join(".forge/logs/trace.jsonl");
+    if !logs_file.exists() {
+        println!("No logs found. Run some tasks first.");
+        return Ok(());
+    }
+
+    let file = std::fs::File::open(&logs_file)?;
+    let reader = std::io::BufReader::new(file);
+    use std::io::BufRead;
+    let mut last_run: Option<serde_json::Value> = None;
+
+    for line in reader.lines() {
+        let line = line?;
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+            if val.get("prompt").is_some() {
+                last_run = Some(val);
+            } else if let Some(fields) = val.get("fields") {
+                if fields.get("prompt").is_some() {
+                    last_run = Some(fields.clone());
+                }
+            }
+        }
+    }
+
+    if let Some(run) = last_run {
+        println!("=== Last Run Summary ===");
+        if let Some(timestamp) = run.get("timestamp") {
+            println!("Time:          {}", timestamp.as_str().unwrap_or(""));
+        }
+        if let Some(prompt) = run.get("prompt") {
+            println!("Prompt:        {}", prompt.as_str().unwrap_or(""));
+        }
+        if let Some(tools) = run.get("tool_calls") {
+            if let Some(arr) = tools.as_array() {
+                let tool_names: Vec<&str> = arr.iter().filter_map(|t| t.as_str()).collect();
+                println!("Tool Calls:    {} ({:?})", tool_names.len(), tool_names);
+            } else if let Some(s) = tools.as_str() {
+                println!("Tool Calls:    {}", s);
+            }
+        }
+        if let Some(tokens) = run.get("tokens") {
+            println!("Tokens Used:   {}", tokens);
+        }
+        if let Some(cost) = run.get("cost") {
+            println!("Cost:          ${:.4}", cost.as_f64().unwrap_or(0.0));
+        }
+        if let Some(passed) = run.get("verify_passed") {
+            println!("Verify Passed: {}", passed.as_bool().unwrap_or(false));
+        }
+        if let Some(duration) = run.get("duration_ms") {
+            println!("Duration:      {}ms", duration.as_u64().unwrap_or(0));
+        }
+        println!("========================");
+    } else {
+        println!("No run logs found in trace.jsonl.");
+    }
+
+    Ok(())
 }
 
 fn list_models(provider_filter: Option<&str>, json: bool) -> Result<()> {
@@ -825,6 +935,7 @@ async fn launch_tui_mode(
     _sandbox: Sandbox,
     project_path: String,
     resume: Option<String>,
+    yolo: bool,
 ) -> Result<()> {
     // Create provider based on registry
     let provider = create_provider_instance(&provider_name, &model, &api_key)?;
@@ -833,6 +944,7 @@ async fn launch_tui_mode(
     let config = TuiConfig {
         fullscreen: false,
         show_agent_panel: true,
+        yolo,
         ..Default::default()
     };
 
@@ -892,8 +1004,14 @@ fn verify_checkpoint(task_id: &str, project_path: &str) -> Result<()> {
 
     match checkpoint {
         Some(checkpoint) => {
-            println!("Resuming task {} from checkpoint at step {}", task_id, checkpoint.step);
-            println!("State size: {} bytes", checkpoint.state.len());
+            println!(
+                "Resuming task {} from checkpoint at step {}",
+                task_id, checkpoint.step
+            );
+            let state_bytes = serde_json::to_vec(&checkpoint.state)
+                .unwrap_or_default()
+                .len();
+            println!("State size: {} bytes", state_bytes);
             Ok(())
         }
         None => {

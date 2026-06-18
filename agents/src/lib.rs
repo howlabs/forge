@@ -11,14 +11,14 @@ pub mod types;
 
 pub use orchestrator::MultiAgentOrchestrator;
 pub use traits::{CheckpointStore, Orchestrator, Verifier};
-pub use types::{Checkpoint, Task, TaskStatus, VerifyReport};
+pub use types::{Checkpoint, CheckpointState, LastVerify, Task, TaskStatus, VerifyReport};
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn test_shared_contract() {
         // Verify shared contract is properly exported
-        use crate::{Checkpoint, Task, TaskStatus, VerifyReport};
+        use crate::{Checkpoint, CheckpointState, Task, TaskStatus, VerifyReport};
 
         // Test that types can be created
         let task = Task::new("Test", std::path::PathBuf::from("/tmp"));
@@ -27,7 +27,15 @@ mod tests {
         let report = VerifyReport::success("OK", 100);
         assert!(report.passed);
 
-        let checkpoint = Checkpoint::new("task-1", 1, vec![1, 2, 3]);
+        let checkpoint = Checkpoint::new(
+            "task-1",
+            1,
+            CheckpointState {
+                history: vec![],
+                worktree_refs: vec![],
+                last_verify: None,
+            },
+        );
         assert_eq!(checkpoint.step, 1);
     }
 }

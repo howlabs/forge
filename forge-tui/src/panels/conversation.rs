@@ -20,6 +20,12 @@ pub struct ConversationPanel {
     scroll_offset: usize,
     /// Auto-scroll to bottom
     auto_scroll: bool,
+    /// Chars waiting to be revealed incrementally each tick
+    stream_queue: Vec<char>,
+    /// In-progress assistant line (rendered before commit)
+    streaming_line: String,
+    /// Whether a stream is in progress
+    streaming_active: bool,
 }
 
 impl ConversationPanel {
@@ -29,7 +35,50 @@ impl ConversationPanel {
             content: Vec::new(),
             scroll_offset: 0,
             auto_scroll: true,
+            stream_queue: Vec::new(),
+            streaming_line: String::new(),
+            streaming_active: false,
         }
+    }
+
+    /// Queue provider tokens for incremental reveal on each tick.
+    pub fn push_stream_delta(&mut self, delta: &str) {
+        self.streaming_active = true;
+        self.stream_queue.extend(delta.chars());
+    }
+
+    /// Reveal up to `max_chars` queued tokens. Returns true if anything was shown.
+    pub fn drain_stream_tick(&mut self, max_chars: usize) -> bool {
+        if self.stream_queue.is_empty() {
+            return false;
+        }
+        let take = self.stream_queue.len().min(max_chars);
+        let chunk: String = self.stream_queue.drain(0..take).collect();
+        self.streaming_line.push_str(&chunk);
+        true
+    }
+
+    /// Flush any remaining queued chars into the in-progress line.
+    pub fn flush_stream(&mut self) {
+        if self.stream_queue.is_empty() {
+            return;
+        }
+        let rest: String = self.stream_queue.drain(..).collect();
+        self.streaming_line.push_str(&rest);
+    }
+
+    /// Commit the in-progress stream as a completed assistant message.
+    pub fn finish_stream(&mut self) {
+        self.flush_stream();
+        let line = std::mem::take(&mut self.streaming_line);
+        if !line.is_empty() {
+            self.add_message(MessageRole::Assistant, &line);
+        }
+        self.streaming_active = false;
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.streaming_active || !self.stream_queue.is_empty()
     }
 
     /// Add streaming content (token-by-token)
@@ -155,17 +204,30 @@ impl ConversationPanel {
     pub fn clear(&mut self) {
         self.content = Vec::new();
         self.scroll_offset = 0;
+        self.stream_queue.clear();
+        self.streaming_line.clear();
+        self.streaming_active = false;
     }
 
     /// Render the panel
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let visible_lines: Vec<Line> = self
+        let mut visible_lines: Vec<Line> = self
             .content
             .iter()
             .skip(self.scroll_offset)
             .take(area.height as usize)
             .cloned()
             .collect();
+
+        if self.is_streaming() && !self.streaming_line.is_empty() {
+            visible_lines.push(Line::from(vec![
+                Span::styled(
+                    format!("Forge: {}", self.streaming_line),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled("▌", Style::default().fg(Color::Green)),
+            ]));
+        }
 
         let paragraph = Paragraph::new(visible_lines)
             .block(
@@ -229,5 +291,23 @@ mod tests {
         panel.add_message(MessageRole::User, "Test");
         panel.clear();
         assert_eq!(panel.content.len(), 0);
+    }
+
+    #[test]
+    fn test_incremental_stream_drain() {
+        let mut panel = ConversationPanel::new();
+        panel.push_stream_delta("hello ");
+        panel.push_stream_delta("world");
+
+        assert!(panel.drain_stream_tick(8));
+        assert_eq!(panel.streaming_line, "hello wo");
+
+        assert!(panel.drain_stream_tick(8));
+        assert_eq!(panel.streaming_line, "hello world");
+        assert!(panel.stream_queue.is_empty());
+
+        panel.finish_stream();
+        assert!(!panel.is_streaming());
+        assert!(panel.content.len() >= 3);
     }
 }

@@ -407,6 +407,10 @@ pub struct EventLoop<P: ModelProvider> {
     observer: Option<LoopEventSender>,
     tool_policy: ToolPolicy,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    tool_calls: Vec<String>,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    start_time: std::time::Instant,
 }
 
 impl<P: ModelProvider> EventLoop<P> {
@@ -428,6 +432,10 @@ impl<P: ModelProvider> EventLoop<P> {
             observer: None,
             tool_policy: ToolPolicy::default(),
             approval_handler: None,
+            tool_calls: Vec::new(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            start_time: std::time::Instant::now(),
         }
     }
 
@@ -565,12 +573,13 @@ impl<P: ModelProvider> EventLoop<P> {
         self.mcp_server.as_ref()
     }
 
-    pub async fn run(&mut self) -> Result<usize> {
+    pub async fn run_internal(&mut self) -> Result<usize> {
         info!("Starting event loop");
 
         if self.task.starts_with("Resume task ") {
             let task_id = self.task.trim_start_matches("Resume task ").to_string();
-            let path = std::path::PathBuf::from(".forge/checkpoints").join(format!("{}.checkpoint", task_id));
+            let path = std::path::PathBuf::from(".forge/checkpoints")
+                .join(format!("{}.checkpoint", task_id));
             if path.exists() {
                 if let Ok(data) = std::fs::read(&path) {
                     #[derive(serde::Deserialize)]
@@ -580,11 +589,16 @@ impl<P: ModelProvider> EventLoop<P> {
                         state: Vec<u8>,
                     }
                     if let Ok(checkpoint) = serde_json::from_slice::<LoopCheckpoint>(&data) {
-                        if let Ok(history) = serde_json::from_slice::<Vec<Message>>(&checkpoint.state) {
+                        if let Ok(history) =
+                            serde_json::from_slice::<Vec<Message>>(&checkpoint.state)
+                        {
                             self.task = checkpoint.task_id;
                             self.history = history;
                             self.steps = checkpoint.step as usize;
-                            info!("Resumed task {} from checkpoint at step {}", self.task, self.steps);
+                            info!(
+                                "Resumed task {} from checkpoint at step {}",
+                                self.task, self.steps
+                            );
                         }
                     }
                 }
@@ -592,7 +606,8 @@ impl<P: ModelProvider> EventLoop<P> {
         }
 
         if self.history.is_empty() {
-            self.history.push(Message::system(self.get_system_prompt().await));
+            self.history
+                .push(Message::system(self.get_system_prompt().await));
             self.history.push(Message::user(self.task.clone()));
         }
 
@@ -609,7 +624,7 @@ impl<P: ModelProvider> EventLoop<P> {
             let response = if self.provider.supports_streaming() {
                 let mut stream = self.provider.chat_stream(&self.history).await?;
                 let mut accumulated_content = String::new();
-                
+
                 struct ToolCallAccumulator {
                     id: String,
                     name: String,
@@ -678,6 +693,8 @@ impl<P: ModelProvider> EventLoop<P> {
             let _ = self.save_checkpoint();
 
             if let Some(usage) = &response.usage {
+                self.prompt_tokens += usage.prompt_tokens;
+                self.completion_tokens += usage.completion_tokens;
                 self.emit(LoopEvent::TokensUsed {
                     prompt: usage.prompt_tokens,
                     completion: usage.completion_tokens,
@@ -695,6 +712,7 @@ impl<P: ModelProvider> EventLoop<P> {
             if !response.tool_calls.is_empty() {
                 for tool_call in response.tool_calls {
                     let tool_name = tool_call.name.clone();
+                    self.tool_calls.push(tool_name.clone());
                     self.emit(LoopEvent::ToolStarted {
                         name: tool_name.clone(),
                     });
@@ -719,13 +737,30 @@ impl<P: ModelProvider> EventLoop<P> {
         Ok(self.steps)
     }
 
+    pub async fn run(&mut self) -> Result<usize> {
+        self.start_time = std::time::Instant::now();
+        self.tool_calls.clear();
+        self.prompt_tokens = 0;
+        self.completion_tokens = 0;
+
+        let steps = self.run_internal().await?;
+        self.log_run_summary(false);
+        Ok(steps)
+    }
+
     pub async fn run_with_verify(
         &mut self,
         verifier: &dyn Verifier,
         workdir: &Path,
         max_retries: usize,
     ) -> Result<usize> {
-        self.run().await?;
+        self.start_time = std::time::Instant::now();
+        self.tool_calls.clear();
+        self.prompt_tokens = 0;
+        self.completion_tokens = 0;
+
+        let _ = self.run_internal().await?;
+        let mut passed = false;
 
         for attempt in 0..max_retries {
             let report = verifier.verify(workdir).await?;
@@ -735,7 +770,8 @@ impl<P: ModelProvider> EventLoop<P> {
             });
             if report.passed {
                 info!("Verify passed after {} steps", self.steps);
-                return Ok(self.steps);
+                passed = true;
+                break;
             }
 
             warn!(
@@ -747,13 +783,64 @@ impl<P: ModelProvider> EventLoop<P> {
                 "Verification failed. Fix the errors and try again:\n{}",
                 report.logs
             )));
-            self.run().await?;
+            let _ = self.run_internal().await?;
         }
 
-        Err(anyhow::anyhow!(
-            "Verify failed after {} retries",
-            max_retries
-        ))
+        self.log_run_summary(passed);
+        if passed {
+            Ok(self.steps)
+        } else {
+            Err(anyhow::anyhow!(
+                "Verify failed after {} retries",
+                max_retries
+            ))
+        }
+    }
+
+    fn log_run_summary(&mut self, verify_passed: bool) {
+        let elapsed = self.start_time.elapsed().as_millis() as u64;
+        let total_tokens = self.prompt_tokens + self.completion_tokens;
+        let model = self.provider.model().to_lowercase();
+        let (input_rate, output_rate) = if model.contains("claude-3-5") || model.contains("sonnet")
+        {
+            (3.00, 15.00)
+        } else if model.contains("gpt-4o") {
+            (2.50, 10.00)
+        } else if model.contains("gemini-1.5-pro") {
+            (1.25, 5.00)
+        } else if model.contains("glm") {
+            (1.00, 2.00)
+        } else if model.contains("mock") {
+            (0.00, 0.00)
+        } else {
+            (2.50, 10.00)
+        };
+        let cost = (self.prompt_tokens as f64 * input_rate
+            + self.completion_tokens as f64 * output_rate)
+            / 1_000_000.0;
+
+        let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let _ = forge_ext::observability::trace_log::log_run(
+            &project_path,
+            &self.task,
+            &self.tool_calls,
+            total_tokens,
+            cost,
+            verify_passed,
+            elapsed,
+        );
+
+        tracing::info!(
+            target: "forge::run",
+            prompt = %self.task,
+            tool_calls = %self.tool_calls.join(","),
+            tokens = total_tokens,
+            cost = cost,
+            verify_passed = verify_passed,
+            duration_ms = elapsed,
+            "run_completed"
+        );
     }
 
     async fn get_system_prompt(&self) -> String {
@@ -769,7 +856,12 @@ impl<P: ModelProvider> EventLoop<P> {
         }
 
         // Relevant code context from semantic retrieval
-        let context_chunks = self.context.lock().await.retrieve(&self.task, 5).unwrap_or_default();
+        let context_chunks = self
+            .context
+            .lock()
+            .await
+            .retrieve(&self.task, 5)
+            .unwrap_or_default();
         if !context_chunks.is_empty() {
             let chunks_text = context_chunks
                 .iter()
@@ -800,7 +892,7 @@ impl<P: ModelProvider> EventLoop<P> {
         let store_dir = std::path::PathBuf::from(".forge/checkpoints");
         std::fs::create_dir_all(&store_dir)?;
         let state_bytes = serde_json::to_vec(&self.history)?;
-        
+
         #[derive(serde::Serialize)]
         struct LoopCheckpoint {
             task_id: String,
@@ -1261,7 +1353,10 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Successfully wrote 16 bytes to approved.txt");
+        assert_eq!(
+            result.unwrap(),
+            "Successfully wrote 16 bytes to approved.txt"
+        );
         assert!(temp_dir.path().join("approved.txt").exists());
     }
 
@@ -1290,7 +1385,10 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires approval"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires approval"));
         assert!(!temp_dir.path().join("rejected.txt").exists());
     }
 
@@ -1465,20 +1563,26 @@ mod tests {
         let provider = MockProvider::new(vec![chat_response("step 1 response", vec![])]);
         let context = ContextEngine::new(temp_dir.path()).unwrap();
         let sandbox = Sandbox::new(temp_dir.path(), "on").unwrap();
-        
+
         let mut event_loop = EventLoop::new(provider, context, sandbox, "task-123".to_string());
         let _ = event_loop.run().await.unwrap();
 
-        let checkpoint_path = std::path::PathBuf::from(".forge/checkpoints").join("task-123.checkpoint");
+        let checkpoint_path =
+            std::path::PathBuf::from(".forge/checkpoints").join("task-123.checkpoint");
         assert!(checkpoint_path.exists());
 
         let provider2 = MockProvider::new(vec![chat_response("step 2 response", vec![])]);
         let context2 = ContextEngine::new(temp_dir.path()).unwrap();
         let sandbox2 = Sandbox::new(temp_dir.path(), "on").unwrap();
-        
-        let mut resume_loop = EventLoop::new(provider2, context2, sandbox2, "Resume task task-123".to_string());
+
+        let mut resume_loop = EventLoop::new(
+            provider2,
+            context2,
+            sandbox2,
+            "Resume task task-123".to_string(),
+        );
         let steps2 = resume_loop.run().await.unwrap();
-        
+
         assert_eq!(steps2, 2);
         assert_eq!(resume_loop.task, "task-123");
         assert_eq!(resume_loop.steps, 2);

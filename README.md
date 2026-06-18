@@ -72,10 +72,10 @@ exercised by the live binary).
 | AGENTS.md loading (layered) | context | ✅ | bounded + unbounded discovery; 79 tests |
 | Semantic context engine (tree-sitter + KG + vector store) | context | 🟡 | 80 tests; `ContextEngine` used in CLI, but `ContextIndex` (tree-sitter + KG + vector) is opt-in via `.with_context_index()`, not the default retrieval path |
 | Multi-agent orchestrator + git worktree | agents | ✅ | spawn/join, worktree-per-task; 10 tests |
-| Checkpoint / resume | verify, forge-cli | 🟡 | `FileCheckpointStore` + `--resume` loads & displays checkpoint; state restore is a TODO |
+| Checkpoint / resume | verify, forge-cli, forge-core | ✅ | `CheckpointState` + `FileCheckpointStore`; `--resume` restores history/worktree and continues |
 | Verify loop (build/test) | verify | ✅ | `BuildVerifier`; 4 tests |
-| Extensions: MCP / hooks / skills / observability | ext | ⚪ | 152 tests; compile but not wired into CLI or TUI |
-| TUI | forge-tui | 🟡 | `SimpleTui` + `TuiApp` with EventLoop integration, conversation/diff/agent panels, input handling; 36 tests. No real-time streaming yet. |
+| Extensions: MCP / hooks / skills / observability | ext | 🟡 | `trace.jsonl` + `forge logs --last` wired; MCP/hooks/skills still scaffold |
+| TUI | forge-tui | ✅ | Real-time streaming, live token/cost bar, interactive approval `[y/n/a]`, `--yolo` |
 | `forge exec` headless | forge-cli | ✅ | fully functional; respects all provider configuration flags. |
 
 ### Original milestone plan (aspirational)

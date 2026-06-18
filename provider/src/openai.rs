@@ -175,10 +175,7 @@ impl ModelProvider for OpenAIProvider {
         true
     }
 
-    async fn chat_stream(
-        &self,
-        messages: &[Message],
-    ) -> Result<mpsc::Receiver<StreamEvent>> {
+    async fn chat_stream(&self, messages: &[Message]) -> Result<mpsc::Receiver<StreamEvent>> {
         StreamingProvider::chat_stream(self, messages).await
     }
 }

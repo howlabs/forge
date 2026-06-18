@@ -73,29 +73,41 @@ impl ModelProvider for MockProvider {
         tokio::spawn(async move {
             if !response.content.is_empty() {
                 for word in response.content.split_inclusive(' ') {
-                    let _ = tx.send(StreamEvent::Delta { content: word.to_string() }).await;
+                    let _ = tx
+                        .send(StreamEvent::Delta {
+                            content: word.to_string(),
+                        })
+                        .await;
                     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
                 }
             }
             for tc in response.tool_calls {
-                let _ = tx.send(StreamEvent::ToolCallStart {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                }).await;
+                let _ = tx
+                    .send(StreamEvent::ToolCallStart {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                    })
+                    .await;
                 tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
                 if let Ok(arg_str) = serde_json::to_string(&tc.arguments) {
-                    let _ = tx.send(StreamEvent::ToolCallArgument {
-                        id: tc.id.clone(),
-                        argument: arg_str,
-                    }).await;
+                    let _ = tx
+                        .send(StreamEvent::ToolCallArgument {
+                            id: tc.id.clone(),
+                            argument: arg_str,
+                        })
+                        .await;
                     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
                 }
 
                 let _ = tx.send(StreamEvent::ToolCallEnd { id: tc.id }).await;
                 tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
             }
-            let _ = tx.send(StreamEvent::Done { usage: response.usage }).await;
+            let _ = tx
+                .send(StreamEvent::Done {
+                    usage: response.usage,
+                })
+                .await;
         });
         Ok(rx)
     }

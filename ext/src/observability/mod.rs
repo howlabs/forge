@@ -8,4 +8,4 @@ pub mod trace_log;
 
 pub use metrics::{MetricsCollector, TokenUsage};
 pub use span::{hook_span, mcp_span, provider_span, step_span, tool_span};
-pub use trace_log::{TraceEvent, TraceLog};
+pub use trace_log::{log_run, TraceEvent, TraceLog};

@@ -54,6 +54,40 @@ impl TraceLog {
     }
 }
 
+/// Write structured log for a run to .forge/logs/trace.jsonl
+pub fn log_run(
+    project_path: &Path,
+    prompt: &str,
+    tool_calls: &[String],
+    tokens: u32,
+    cost: f64,
+    verify_passed: bool,
+    duration_ms: u64,
+) -> anyhow::Result<()> {
+    let logs_dir = project_path.join(".forge/logs");
+    std::fs::create_dir_all(&logs_dir)?;
+    let log_file_path = logs_dir.join("trace.jsonl");
+
+    let log_entry = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "prompt": prompt,
+        "tool_calls": tool_calls,
+        "tokens": tokens,
+        "cost": cost,
+        "verify_passed": verify_passed,
+        "duration_ms": duration_ms,
+    });
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(log_file_path)?;
+
+    writeln!(file, "{}", serde_json::to_string(&log_entry)?)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,7 +11,8 @@ pub mod checkpoint_store;
 pub mod verifier;
 
 // Re-export implementations
-pub use checkpoint_store::FileCheckpointStore;
+pub use checkpoint_store::CachedCheckpointStore;
+pub use forge_core::FileCheckpointStore;
 pub use verifier::{detect_verify_commands, resolve_verify_commands, BuildVerifier};
 
 // Re-export shared types and traits from forge-agents

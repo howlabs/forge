@@ -13,21 +13,21 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style, Modifier},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Terminal,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
+use crate::command_palette::SlashCommand;
+use crate::panels::diff_viewer::{DiffHunk, HunkState};
 use crate::TuiConfig;
 use provider::ModelProvider;
-use crate::panels::diff_viewer::{DiffHunk, HunkState};
-use crate::command_palette::SlashCommand;
 
 #[derive(Clone)]
 pub enum ConversationEntry {
@@ -148,8 +148,14 @@ fn strip_jsonc_comments(jsonc: &str) -> String {
 fn load_opencode_config() -> Option<OpenCodeConfig> {
     let home = std::env::var("HOME").ok()?;
     let config_paths = vec![
-        std::path::PathBuf::from(&home).join(".config").join("opencode").join("opencode.json"),
-        std::path::PathBuf::from(&home).join(".config").join("opencode").join("opencode.jsonc"),
+        std::path::PathBuf::from(&home)
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json"),
+        std::path::PathBuf::from(&home)
+            .join(".config")
+            .join("opencode")
+            .join("opencode.jsonc"),
     ];
 
     for path in config_paths {
@@ -182,6 +188,9 @@ pub struct SimpleTui {
     agent_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AgentUpdate>>,
     token_used: u32,
     token_budget: u32,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cost: f64,
 
     // Redesigned fields
     focus: Focus,
@@ -196,6 +205,8 @@ pub struct SimpleTui {
     checkpoint_available: Option<String>,
     auto_resume_task: Option<String>,
     has_exact_tokens: bool,
+    /// Session-wide auto-approve (set via [a] at approval prompt)
+    approve_session: bool,
     pending_approval: Option<PendingApproval>,
     theme_mode: ThemeMode,
     stream_queue: Vec<char>,
@@ -215,7 +226,7 @@ fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> String {
     if lower == "mock" || lower == "local" {
         return String::new();
     }
-    
+
     let env_var = match lower.as_str() {
         "openai" => "OPENAI_API_KEY",
         "zai" => "ZAI_API_KEY",
@@ -224,7 +235,7 @@ fn resolve_api_key(provider_name: &str, explicit: Option<String>) -> String {
         "gemini" => "GEMINI_API_KEY",
         _ => "FORGE_API_KEY",
     };
-    
+
     std::env::var(env_var).unwrap_or_default()
 }
 
@@ -232,7 +243,7 @@ impl SimpleTui {
     /// Create new SimpleTui with provider
     pub fn new(config: TuiConfig, provider: Arc<dyn ModelProvider>) -> Self {
         let opencode_config = load_opencode_config();
-        
+
         let mut providers = vec![
             "anthropic".to_string(),
             "gemini".to_string(),
@@ -241,7 +252,7 @@ impl SimpleTui {
         for p in provider::PROVIDERS {
             providers.push(p.name.to_string());
         }
-        
+
         // Add providers from opencode.json
         if let Some(config) = &opencode_config {
             if let Some(prov_map) = &config.provider {
@@ -269,6 +280,9 @@ impl SimpleTui {
             agent_rx: None,
             token_used: 0,
             token_budget: 200_000,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost: 0.0,
             focus: Focus::Input,
             diff_hunks: Vec::new(),
             selected_hunk: 0,
@@ -281,6 +295,7 @@ impl SimpleTui {
             checkpoint_available: None,
             auto_resume_task: None,
             has_exact_tokens: false,
+            approve_session: config.yolo,
             pending_approval: None,
             theme_mode: ThemeMode::Dark,
             stream_queue: Vec::new(),
@@ -315,13 +330,25 @@ impl SimpleTui {
         self
     }
 
+    fn auto_approve_tools(&self) -> bool {
+        self._config.yolo || self.approve_session
+    }
+
+    fn tool_policy(&self) -> forge_core::event_loop::ToolPolicy {
+        let allow = self.auto_approve_tools();
+        forge_core::event_loop::ToolPolicy {
+            allow_writes: allow,
+            allow_commands: allow,
+        }
+    }
+
     fn resolve_api_key_with_config(&self, provider_name: &str, explicit: Option<String>) -> String {
         if let Some(key) = explicit.filter(|k| !k.is_empty()) {
             return key;
         }
-        
+
         let lower = provider_name.to_lowercase();
-        
+
         // 1. Try opencode config options.apiKey
         if let Some(config) = &self.opencode_config {
             if let Some(prov_map) = &config.provider {
@@ -341,17 +368,24 @@ impl SimpleTui {
         resolve_api_key(&lower, None)
     }
 
-    fn create_tui_provider(&self, provider_name: &str, model: &str, api_key: &str) -> anyhow::Result<Arc<dyn ModelProvider>> {
+    fn create_tui_provider(
+        &self,
+        provider_name: &str,
+        model: &str,
+        api_key: &str,
+    ) -> anyhow::Result<Arc<dyn ModelProvider>> {
         let lower = provider_name.to_lowercase();
-        
+
         // 1. Check if the provider is defined in opencode.json config
-        if let Some(cfg_prov) = self.opencode_config.as_ref()
+        if let Some(cfg_prov) = self
+            .opencode_config
+            .as_ref()
             .and_then(|c| c.provider.as_ref())
-            .and_then(|p| p.get(&lower)) 
+            .and_then(|p| p.get(&lower))
         {
             let options_key = cfg_prov.options.as_ref().and_then(|o| o.api_key.clone());
             let options_url = cfg_prov.options.as_ref().and_then(|o| o.base_url.clone());
-            
+
             let resolved_key = if api_key.is_empty() {
                 options_key.unwrap_or_default()
             } else {
@@ -373,7 +407,8 @@ impl SimpleTui {
             });
 
             if let Some(base_url) = resolved_url {
-                let provider = provider::OpenAIProvider::with_base_url(model, resolved_key, base_url);
+                let provider =
+                    provider::OpenAIProvider::with_base_url(model, resolved_key, base_url);
                 return Ok(Arc::new(provider));
             }
         }
@@ -401,19 +436,20 @@ impl SimpleTui {
 
         // 2. Fall back to static MODEL_CATALOG
         if models.is_empty() {
-            models = provider::MODEL_CATALOG.iter()
+            models = provider::MODEL_CATALOG
+                .iter()
                 .filter(|m| m.provider == provider)
                 .map(|m| m.model.to_string())
                 .collect();
         }
-            
+
         if models.is_empty() {
             models.push("default".to_string());
         }
 
         models.sort();
         models.dedup();
-        
+
         self.connect_popup.models = models;
         self.connect_popup.selected_model_idx = 0;
     }
@@ -445,12 +481,21 @@ impl SimpleTui {
             "Welcome to Forge TUI! Type your message and press Enter to send.".to_string(),
         ));
         self.add_entry(ConversationEntry::System(
-            "Press Shift+Tab to toggle Plan Mode, Tab to cycle pane focus, 'q' to quit.".to_string(),
+            "Press Shift+Tab to toggle Plan Mode, Tab to cycle pane focus, 'q' to quit."
+                .to_string(),
         ));
+        if self._config.yolo {
+            self.add_entry(ConversationEntry::System(
+                "YOLO mode: auto-approving all file edits and commands.".to_string(),
+            ));
+        }
 
         // Auto-resume task if requested
         if let Some(task_id) = self.auto_resume_task.take() {
-            self.add_entry(ConversationEntry::System(format!("Resuming task from checkpoint: {}", task_id)));
+            self.add_entry(ConversationEntry::System(format!(
+                "Resuming task from checkpoint: {}",
+                task_id
+            )));
             self.start_agent_task(format!("Resume task {}", task_id));
         }
 
@@ -482,7 +527,9 @@ impl SimpleTui {
             match key.code {
                 KeyCode::Esc => {
                     self.connect_popup.active = false;
-                    self.add_entry(ConversationEntry::System("Interactive connection cancelled.".to_string()));
+                    self.add_entry(ConversationEntry::System(
+                        "Interactive connection cancelled.".to_string(),
+                    ));
                 }
                 KeyCode::Tab => {
                     self.connect_popup.active_field = match self.connect_popup.active_field {
@@ -498,42 +545,44 @@ impl SimpleTui {
                         ConnectPopupField::ApiKey => ConnectPopupField::Model,
                     };
                 }
-                KeyCode::Up => {
-                    match self.connect_popup.active_field {
-                        ConnectPopupField::Provider => {
-                            if self.connect_popup.selected_provider_idx > 0 {
-                                self.connect_popup.selected_provider_idx -= 1;
-                                self.update_connect_popup_models();
-                                let p = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
-                                self.connect_popup.api_key = self.resolve_api_key_with_config(p, None);
-                            }
+                KeyCode::Up => match self.connect_popup.active_field {
+                    ConnectPopupField::Provider => {
+                        if self.connect_popup.selected_provider_idx > 0 {
+                            self.connect_popup.selected_provider_idx -= 1;
+                            self.update_connect_popup_models();
+                            let p = &self.connect_popup.providers
+                                [self.connect_popup.selected_provider_idx];
+                            self.connect_popup.api_key = self.resolve_api_key_with_config(p, None);
                         }
-                        ConnectPopupField::Model => {
-                            if self.connect_popup.selected_model_idx > 0 {
-                                self.connect_popup.selected_model_idx -= 1;
-                            }
-                        }
-                        ConnectPopupField::ApiKey => {}
                     }
-                }
-                KeyCode::Down => {
-                    match self.connect_popup.active_field {
-                        ConnectPopupField::Provider => {
-                            if self.connect_popup.selected_provider_idx + 1 < self.connect_popup.providers.len() {
-                                self.connect_popup.selected_provider_idx += 1;
-                                self.update_connect_popup_models();
-                                let p = &self.connect_popup.providers[self.connect_popup.selected_provider_idx];
-                                self.connect_popup.api_key = self.resolve_api_key_with_config(p, None);
-                            }
+                    ConnectPopupField::Model => {
+                        if self.connect_popup.selected_model_idx > 0 {
+                            self.connect_popup.selected_model_idx -= 1;
                         }
-                        ConnectPopupField::Model => {
-                            if self.connect_popup.selected_model_idx + 1 < self.connect_popup.models.len() {
-                                self.connect_popup.selected_model_idx += 1;
-                            }
-                        }
-                        ConnectPopupField::ApiKey => {}
                     }
-                }
+                    ConnectPopupField::ApiKey => {}
+                },
+                KeyCode::Down => match self.connect_popup.active_field {
+                    ConnectPopupField::Provider => {
+                        if self.connect_popup.selected_provider_idx + 1
+                            < self.connect_popup.providers.len()
+                        {
+                            self.connect_popup.selected_provider_idx += 1;
+                            self.update_connect_popup_models();
+                            let p = &self.connect_popup.providers
+                                [self.connect_popup.selected_provider_idx];
+                            self.connect_popup.api_key = self.resolve_api_key_with_config(p, None);
+                        }
+                    }
+                    ConnectPopupField::Model => {
+                        if self.connect_popup.selected_model_idx + 1
+                            < self.connect_popup.models.len()
+                        {
+                            self.connect_popup.selected_model_idx += 1;
+                        }
+                    }
+                    ConnectPopupField::ApiKey => {}
+                },
                 KeyCode::Char(c) => {
                     if self.connect_popup.active_field == ConnectPopupField::ApiKey {
                         self.connect_popup.api_key.push(c);
@@ -545,23 +594,29 @@ impl SimpleTui {
                     }
                 }
                 KeyCode::Enter => {
-                    let provider = self.connect_popup.providers[self.connect_popup.selected_provider_idx].clone();
-                    let model = self.connect_popup.models.get(self.connect_popup.selected_model_idx)
+                    let provider = self.connect_popup.providers
+                        [self.connect_popup.selected_provider_idx]
+                        .clone();
+                    let model = self
+                        .connect_popup
+                        .models
+                        .get(self.connect_popup.selected_model_idx)
                         .cloned()
                         .unwrap_or_else(|| "default".to_string());
                     let key = self.connect_popup.api_key.clone();
-                    
+
                     self.connect_popup.active = false;
-                    
+
                     let key_resolved = if key.is_empty() {
                         self.resolve_api_key_with_config(&provider, None)
                     } else {
                         key
                     };
-                    
+
                     if key_resolved.is_empty() && provider != "mock" && provider != "local" {
                         self.add_entry(ConversationEntry::System(format!(
-                            "Error: No API key resolved for provider '{}'.", provider
+                            "Error: No API key resolved for provider '{}'.",
+                            provider
                         )));
                     } else {
                         match self.create_tui_provider(&provider, &model, &key_resolved) {
@@ -574,7 +629,8 @@ impl SimpleTui {
                             }
                             Err(e) => {
                                 self.add_entry(ConversationEntry::System(format!(
-                                    "Failed to connect to provider '{}': {}", provider, e
+                                    "Failed to connect to provider '{}': {}",
+                                    provider, e
                                 )));
                             }
                         }
@@ -590,11 +646,25 @@ impl SimpleTui {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     let _ = pending.tx.send(true);
-                    self.add_entry(ConversationEntry::System(format!("Tool '{}' approved.", pending.tool_name)));
+                    self.add_entry(ConversationEntry::System(format!(
+                        "Tool '{}' approved.",
+                        pending.tool_name
+                    )));
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.approve_session = true;
+                    let _ = pending.tx.send(true);
+                    self.add_entry(ConversationEntry::System(format!(
+                        "Tool '{}' approved. Auto-approving writes/commands for this session.",
+                        pending.tool_name
+                    )));
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
                     let _ = pending.tx.send(false);
-                    self.add_entry(ConversationEntry::System(format!("Tool '{}' rejected.", pending.tool_name)));
+                    self.add_entry(ConversationEntry::System(format!(
+                        "Tool '{}' rejected.",
+                        pending.tool_name
+                    )));
                 }
                 _ => {
                     // Put it back if any other key is pressed
@@ -613,15 +683,26 @@ impl SimpleTui {
         // Ctrl+p toggles Agent Activity Panel (Yoga layout toggle)
         if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.show_agent_panel = !self.show_agent_panel;
-            let state = if self.show_agent_panel { "shown" } else { "hidden" };
-            self.add_entry(ConversationEntry::System(format!("Agent activity panel is now {}", state)));
+            let state = if self.show_agent_panel {
+                "shown"
+            } else {
+                "hidden"
+            };
+            self.add_entry(ConversationEntry::System(format!(
+                "Agent activity panel is now {}",
+                state
+            )));
             return;
         }
 
         // Shift+Tab (BackTab) toggles Plan Mode globally (Kiro CLI style)
         if key.code == KeyCode::BackTab {
             self.plan_mode = !self.plan_mode;
-            let status = if self.plan_mode { "enabled" } else { "disabled" };
+            let status = if self.plan_mode {
+                "enabled"
+            } else {
+                "disabled"
+            };
             self.add_entry(ConversationEntry::System(format!("Plan mode {}", status)));
             return;
         }
@@ -630,40 +711,61 @@ impl SimpleTui {
         if key.code == KeyCode::Char('R') && self.checkpoint_available.is_some() {
             if let Some(task_id) = self.checkpoint_available.clone() {
                 self.checkpoint_available = None;
-                self.add_entry(ConversationEntry::System(format!("Resuming task from checkpoint: {}", task_id)));
+                self.add_entry(ConversationEntry::System(format!(
+                    "Resuming task from checkpoint: {}",
+                    task_id
+                )));
                 self.start_agent_task(format!("Resume task {}", task_id));
             }
             return;
         }
 
         match self.focus {
-            Focus::Input => {
-                match key.code {
-                    KeyCode::Esc => {
-                        if !self.has_draft() {
-                            self.running = false;
-                        }
+            Focus::Input => match key.code {
+                KeyCode::Esc => {
+                    if !self.has_draft() {
+                        self.running = false;
                     }
-                    KeyCode::Char('q') => {
-                        if !self.has_draft() {
-                            self.running = false;
-                        }
+                }
+                KeyCode::Char('q') => {
+                    if !self.has_draft() {
+                        self.running = false;
                     }
-                    KeyCode::Char('?') => {
-                        self.show_help = !self.show_help;
-                        if self.show_help {
-                            self.show_help();
-                        }
+                }
+                KeyCode::Char('?') => {
+                    self.show_help = !self.show_help;
+                    if self.show_help {
+                        self.show_help();
                     }
-                    KeyCode::Enter => {
-                        let trimmed = self.input.trim();
-                        let is_valid_complete_command = if trimmed.starts_with('/') {
-                            SlashCommand::parse(trimmed).is_some()
-                        } else {
-                            false
-                        };
+                }
+                KeyCode::Enter => {
+                    let trimmed = self.input.trim();
+                    let is_valid_complete_command = if trimmed.starts_with('/') {
+                        SlashCommand::parse(trimmed).is_some()
+                    } else {
+                        false
+                    };
 
-                        if is_valid_complete_command {
+                    if is_valid_complete_command {
+                        self.autocomplete_options.clear();
+                        self.autocomplete_index = 0;
+                        if !self.input.trim().is_empty() {
+                            if self.agent_running && !self.is_local_command(&self.input) {
+                                self.queue_current_input();
+                            } else {
+                                self.send_message().await;
+                            }
+                        }
+                    } else if !self.autocomplete_options.is_empty() {
+                        let option = self.autocomplete_options[self.autocomplete_index].clone();
+                        let prev_input = self.input.clone();
+                        self.input = option.clone();
+                        self.cursor = self.input.len();
+                        self.update_autocomplete_options();
+
+                        if (!option.ends_with(' ') && !option.ends_with('/'))
+                            || prev_input == option
+                        {
                             self.autocomplete_options.clear();
                             self.autocomplete_index = 0;
                             if !self.input.trim().is_empty() {
@@ -673,158 +775,137 @@ impl SimpleTui {
                                     self.send_message().await;
                                 }
                             }
-                        } else if !self.autocomplete_options.is_empty() {
-                            let option = self.autocomplete_options[self.autocomplete_index].clone();
-                            let prev_input = self.input.clone();
-                            self.input = option.clone();
-                            self.cursor = self.input.len();
-                            self.update_autocomplete_options();
-                            
-                            if (!option.ends_with(' ') && !option.ends_with('/')) || prev_input == option {
-                                self.autocomplete_options.clear();
-                                self.autocomplete_index = 0;
-                                if !self.input.trim().is_empty() {
-                                    if self.agent_running && !self.is_local_command(&self.input) {
-                                        self.queue_current_input();
-                                    } else {
-                                        self.send_message().await;
-                                    }
-                                }
-                            }
-                        } else if !self.input.trim().is_empty() {
-                            if self.agent_running && !self.is_local_command(&self.input) {
-                                self.queue_current_input();
-                            } else {
-                                self.send_message().await;
-                            }
+                        }
+                    } else if !self.input.trim().is_empty() {
+                        if self.agent_running && !self.is_local_command(&self.input) {
+                            self.queue_current_input();
+                        } else {
+                            self.send_message().await;
                         }
                     }
-                    KeyCode::Backspace => {
-                        if self.cursor > 0 {
-                            let previous = self.previous_cursor_boundary();
-                            self.input.drain(previous..self.cursor);
-                            self.cursor = previous;
-                            self.update_autocomplete_options();
-                        }
+                }
+                KeyCode::Backspace => {
+                    if self.cursor > 0 {
+                        let previous = self.previous_cursor_boundary();
+                        self.input.drain(previous..self.cursor);
+                        self.cursor = previous;
+                        self.update_autocomplete_options();
                     }
-                    KeyCode::Delete => {
-                        if self.cursor < self.input.len() {
-                            self.input.remove(self.cursor);
-                        }
+                }
+                KeyCode::Delete => {
+                    if self.cursor < self.input.len() {
+                        self.input.remove(self.cursor);
                     }
-                    KeyCode::Left => {
-                        self.cursor = self.previous_cursor_boundary();
+                }
+                KeyCode::Left => {
+                    self.cursor = self.previous_cursor_boundary();
+                }
+                KeyCode::Right => {
+                    self.cursor = self.next_cursor_boundary();
+                }
+                KeyCode::Home => {
+                    self.cursor = 0;
+                }
+                KeyCode::End => {
+                    self.cursor = self.input.len();
+                }
+                KeyCode::Up if !self.autocomplete_options.is_empty() => {
+                    if self.autocomplete_index > 0 {
+                        self.autocomplete_index -= 1;
+                    } else {
+                        self.autocomplete_index = self.autocomplete_options.len().saturating_sub(1);
                     }
-                    KeyCode::Right => {
-                        self.cursor = self.next_cursor_boundary();
-                    }
-                    KeyCode::Home => {
-                        self.cursor = 0;
-                    }
-                    KeyCode::End => {
+                }
+                KeyCode::Down if !self.autocomplete_options.is_empty() => {
+                    self.autocomplete_index =
+                        (self.autocomplete_index + 1) % self.autocomplete_options.len();
+                }
+                KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.history_back();
+                }
+                KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.history_forward();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.input.clear();
+                    self.cursor = 0;
+                    self.update_autocomplete_options();
+                }
+                KeyCode::Tab => {
+                    if !self.autocomplete_options.is_empty() {
+                        self.input = self.autocomplete_options[self.autocomplete_index].clone();
                         self.cursor = self.input.len();
-                    }
-                    KeyCode::Up if !self.autocomplete_options.is_empty() => {
-                        if self.autocomplete_index > 0 {
-                            self.autocomplete_index -= 1;
-                        } else {
-                            self.autocomplete_index = self.autocomplete_options.len().saturating_sub(1);
-                        }
-                    }
-                    KeyCode::Down if !self.autocomplete_options.is_empty() => {
-                        self.autocomplete_index = (self.autocomplete_index + 1) % self.autocomplete_options.len();
-                    }
-                    KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.history_back();
-                    }
-                    KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.history_forward();
-                    }
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.input.clear();
-                        self.cursor = 0;
                         self.update_autocomplete_options();
-                    }
-                    KeyCode::Tab => {
-                        if !self.autocomplete_options.is_empty() {
-                            self.input = self.autocomplete_options[self.autocomplete_index].clone();
-                            self.cursor = self.input.len();
-                            self.update_autocomplete_options();
+                    } else {
+                        self.focus = if !self.diff_hunks.is_empty() {
+                            Focus::Diff
                         } else {
-                            self.focus = if !self.diff_hunks.is_empty() {
-                                Focus::Diff
-                            } else {
-                                Focus::Conversation
-                            };
-                        }
+                            Focus::Conversation
+                        };
                     }
-                    KeyCode::Char(c) => {
-                        self.input.insert(self.cursor, c);
-                        self.cursor += c.len_utf8();
-                        self.history_index = None;
-                        self.update_autocomplete_options();
-                    }
-                    _ => {}
                 }
-            }
-            Focus::Diff => {
-                match key.code {
-                    KeyCode::Esc => {
-                        self.focus = Focus::Input;
-                    }
-                    KeyCode::Up => {
-                        if self.selected_hunk > 0 {
-                            self.selected_hunk -= 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        if self.selected_hunk < self.diff_hunks.len().saturating_sub(1) {
-                            self.selected_hunk += 1;
-                        }
-                    }
-                    KeyCode::Char('a') | KeyCode::Enter => {
-                        if self.selected_hunk < self.diff_hunks.len() {
-                            self.diff_hunks[self.selected_hunk].state = HunkState::Approved;
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        if self.selected_hunk < self.diff_hunks.len() {
-                            self.diff_hunks[self.selected_hunk].state = HunkState::Rejected;
-                        }
-                    }
-                    KeyCode::Char('A') => {
-                        for hunk in &mut self.diff_hunks {
-                            hunk.state = HunkState::Approved;
-                        }
-                    }
-                    KeyCode::Char('R') => {
-                        for hunk in &mut self.diff_hunks {
-                            hunk.state = HunkState::Rejected;
-                        }
-                    }
-                    KeyCode::Tab => {
-                        self.focus = Focus::Conversation;
-                    }
-                    _ => {}
+                KeyCode::Char(c) => {
+                    self.input.insert(self.cursor, c);
+                    self.cursor += c.len_utf8();
+                    self.history_index = None;
+                    self.update_autocomplete_options();
                 }
-            }
-            Focus::Conversation => {
-                match key.code {
-                    KeyCode::Esc => {
-                        self.focus = Focus::Input;
-                    }
-                    KeyCode::Up | KeyCode::PageUp => {
-                        self.scroll_offset = self.scroll_offset.saturating_add(2);
-                    }
-                    KeyCode::Down | KeyCode::PageDown => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(2);
-                    }
-                    KeyCode::Tab => {
-                        self.focus = Focus::Input;
-                    }
-                    _ => {}
+                _ => {}
+            },
+            Focus::Diff => match key.code {
+                KeyCode::Esc => {
+                    self.focus = Focus::Input;
                 }
-            }
+                KeyCode::Up => {
+                    if self.selected_hunk > 0 {
+                        self.selected_hunk -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.selected_hunk < self.diff_hunks.len().saturating_sub(1) {
+                        self.selected_hunk += 1;
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Enter => {
+                    if self.selected_hunk < self.diff_hunks.len() {
+                        self.diff_hunks[self.selected_hunk].state = HunkState::Approved;
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if self.selected_hunk < self.diff_hunks.len() {
+                        self.diff_hunks[self.selected_hunk].state = HunkState::Rejected;
+                    }
+                }
+                KeyCode::Char('A') => {
+                    for hunk in &mut self.diff_hunks {
+                        hunk.state = HunkState::Approved;
+                    }
+                }
+                KeyCode::Char('R') => {
+                    for hunk in &mut self.diff_hunks {
+                        hunk.state = HunkState::Rejected;
+                    }
+                }
+                KeyCode::Tab => {
+                    self.focus = Focus::Conversation;
+                }
+                _ => {}
+            },
+            Focus::Conversation => match key.code {
+                KeyCode::Esc => {
+                    self.focus = Focus::Input;
+                }
+                KeyCode::Up | KeyCode::PageUp => {
+                    self.scroll_offset = self.scroll_offset.saturating_add(2);
+                }
+                KeyCode::Down | KeyCode::PageDown => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(2);
+                }
+                KeyCode::Tab => {
+                    self.focus = Focus::Input;
+                }
+                _ => {}
+            },
         }
     }
 
@@ -843,35 +924,48 @@ impl SimpleTui {
                 match cmd {
                     SlashCommand::Plan => {
                         self.plan_mode = !self.plan_mode;
-                        let status = if self.plan_mode { "enabled" } else { "disabled" };
+                        let status = if self.plan_mode {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        };
                         self.add_entry(ConversationEntry::System(format!("Plan mode {}", status)));
                     }
                     SlashCommand::Help => {
                         self.show_help();
                     }
-                    SlashCommand::Theme { theme } => {
-                        match theme.as_str() {
-                            "dark" => {
-                                self.theme_mode = ThemeMode::Dark;
-                                self.add_entry(ConversationEntry::System("Theme changed to dark".to_string()));
-                            }
-                            "light" => {
-                                self.theme_mode = ThemeMode::Light;
-                                self.add_entry(ConversationEntry::System("Theme changed to light".to_string()));
-                            }
-                            "safe" => {
-                                self.theme_mode = ThemeMode::Safe;
-                                self.add_entry(ConversationEntry::System("Theme changed to safe (high compatibility)".to_string()));
-                            }
-                            _ => {
-                                self.add_entry(ConversationEntry::System("Unknown theme. Available: dark, light, safe".to_string()));
-                            }
+                    SlashCommand::Theme { theme } => match theme.as_str() {
+                        "dark" => {
+                            self.theme_mode = ThemeMode::Dark;
+                            self.add_entry(ConversationEntry::System(
+                                "Theme changed to dark".to_string(),
+                            ));
                         }
-                    }
+                        "light" => {
+                            self.theme_mode = ThemeMode::Light;
+                            self.add_entry(ConversationEntry::System(
+                                "Theme changed to light".to_string(),
+                            ));
+                        }
+                        "safe" => {
+                            self.theme_mode = ThemeMode::Safe;
+                            self.add_entry(ConversationEntry::System(
+                                "Theme changed to safe (high compatibility)".to_string(),
+                            ));
+                        }
+                        _ => {
+                            self.add_entry(ConversationEntry::System(
+                                "Unknown theme. Available: dark, light, safe".to_string(),
+                            ));
+                        }
+                    },
                     SlashCommand::Model { model } => {
-                        if let Some(info) = provider::MODEL_CATALOG.iter().find(|m| m.model == model) {
+                        if let Some(info) =
+                            provider::MODEL_CATALOG.iter().find(|m| m.model == model)
+                        {
                             let key = self.resolve_api_key_with_config(info.provider, None);
-                            if key.is_empty() && info.provider != "mock" && info.provider != "local" {
+                            if key.is_empty() && info.provider != "mock" && info.provider != "local"
+                            {
                                 self.add_entry(ConversationEntry::System(format!(
                                     "Error: API key not found for provider '{}'. Please set the environment variable.",
                                     info.provider
@@ -895,11 +989,12 @@ impl SimpleTui {
                             }
                         } else {
                             let current_model = self.provider.model();
-                            let current_provider = provider::MODEL_CATALOG.iter()
+                            let current_provider = provider::MODEL_CATALOG
+                                .iter()
                                 .find(|m| m.model == current_model)
                                 .map(|m| m.provider)
                                 .unwrap_or("openai");
-                                
+
                             let key = self.resolve_api_key_with_config(current_provider, None);
                             match self.create_tui_provider(current_provider, &model, &key) {
                                 Ok(new_provider) => {
@@ -910,7 +1005,8 @@ impl SimpleTui {
                                     )));
                                 }
                                 Err(_) => {
-                                    match provider::create_provider(current_provider, &model, &key) {
+                                    match provider::create_provider(current_provider, &model, &key)
+                                    {
                                         Ok(new_provider) => {
                                             self.provider = new_provider;
                                             self.add_entry(ConversationEntry::System(format!(
@@ -929,7 +1025,11 @@ impl SimpleTui {
                             }
                         }
                     }
-                    SlashCommand::Connect { provider, model, api_key } => {
+                    SlashCommand::Connect {
+                        provider,
+                        model,
+                        api_key,
+                    } => {
                         if provider.is_empty() {
                             self.connect_popup.active = true;
                             self.connect_popup.active_field = ConnectPopupField::Provider;
@@ -937,7 +1037,8 @@ impl SimpleTui {
                             self.connect_popup.selected_model_idx = 0;
                             self.update_connect_popup_models();
                             let default_provider = &self.connect_popup.providers[0];
-                            self.connect_popup.api_key = self.resolve_api_key_with_config(default_provider, None);
+                            self.connect_popup.api_key =
+                                self.resolve_api_key_with_config(default_provider, None);
                             self.add_entry(ConversationEntry::System(
                                 "Opened interactive Connect Selector. Press [Tab] to switch fields, [Up/Down] to select, [Enter] to connect, [Esc] to close.".to_string()
                             ));
@@ -962,22 +1063,29 @@ impl SimpleTui {
                                         }
                                     }
                                 }
-                                
+
                                 default_m.unwrap_or_else(|| {
                                     provider::default_model(&provider_lower)
                                         .map(|m| m.model.to_string())
                                         .unwrap_or_else(|| "default".to_string())
                                 })
                             });
-                            
+
                             let key = self.resolve_api_key_with_config(&provider_lower, api_key);
-                            if key.is_empty() && provider_lower != "mock" && provider_lower != "local" {
+                            if key.is_empty()
+                                && provider_lower != "mock"
+                                && provider_lower != "local"
+                            {
                                 self.add_entry(ConversationEntry::System(format!(
                                     "Error: No API key resolved for provider '{}'. Please pass it or set the environment variable.",
                                     prov_name
                                 )));
                             } else {
-                                match self.create_tui_provider(&provider_lower, &resolved_model, &key) {
+                                match self.create_tui_provider(
+                                    &provider_lower,
+                                    &resolved_model,
+                                    &key,
+                                ) {
                                     Ok(new_provider) => {
                                         self.provider = new_provider;
                                         self.add_entry(ConversationEntry::System(format!(
@@ -996,34 +1104,55 @@ impl SimpleTui {
                         }
                     }
                     SlashCommand::Resume { task_id } => {
-                        self.add_entry(ConversationEntry::System(format!("Resuming task from checkpoint: {}", task_id)));
+                        self.add_entry(ConversationEntry::System(format!(
+                            "Resuming task from checkpoint: {}",
+                            task_id
+                        )));
                         self.start_agent_task(format!("Resume task {}", task_id));
                     }
                     SlashCommand::Diff { .. } => {
                         if !self.diff_hunks.is_empty() {
                             self.focus = Focus::Diff;
                         } else {
-                            self.add_entry(ConversationEntry::System("No active diff to view".to_string()));
+                            self.add_entry(ConversationEntry::System(
+                                "No active diff to view".to_string(),
+                            ));
                         }
                     }
                     SlashCommand::Context { action, path } => {
                         let path_str = path.unwrap_or_else(|| "current directory".to_string());
-                        self.add_entry(ConversationEntry::System(format!("Context action '{}' on '{}'", action, path_str)));
+                        self.add_entry(ConversationEntry::System(format!(
+                            "Context action '{}' on '{}'",
+                            action, path_str
+                        )));
                     }
                     SlashCommand::Agents { action, agent_id } => {
                         if action == "toggle" {
                             self.show_agent_panel = !self.show_agent_panel;
-                            let state = if self.show_agent_panel { "shown" } else { "hidden" };
-                            self.add_entry(ConversationEntry::System(format!("Agent activity panel is now {}", state)));
+                            let state = if self.show_agent_panel {
+                                "shown"
+                            } else {
+                                "hidden"
+                            };
+                            self.add_entry(ConversationEntry::System(format!(
+                                "Agent activity panel is now {}",
+                                state
+                            )));
                         } else {
                             let id_str = agent_id.unwrap_or_else(|| "all".to_string());
-                            self.add_entry(ConversationEntry::System(format!("Agent action '{}' on '{}'", action, id_str)));
+                            self.add_entry(ConversationEntry::System(format!(
+                                "Agent action '{}' on '{}'",
+                                action, id_str
+                            )));
                         }
                     }
                     _ => {}
                 }
             } else {
-                self.add_entry(ConversationEntry::System(format!("Unknown command: {}", trimmed)));
+                self.add_entry(ConversationEntry::System(format!(
+                    "Unknown command: {}",
+                    trimmed
+                )));
             }
             return;
         }
@@ -1052,6 +1181,8 @@ impl SimpleTui {
         let project_path = std::env::current_dir().unwrap_or_default();
         let task_clone = task.clone();
         let tx_clone = tx.clone();
+        let auto_approve = self.auto_approve_tools();
+        let tool_policy = self.tool_policy();
 
         tokio::spawn(async move {
             let project_path = project_path.to_str().unwrap_or(".");
@@ -1070,34 +1201,32 @@ impl SimpleTui {
                 }
             };
 
-            struct TuiApprovalHandler {
-                tx: tokio::sync::mpsc::UnboundedSender<AgentUpdate>,
-            }
-            #[async_trait::async_trait]
-            impl forge_core::event_loop::ApprovalHandler for TuiApprovalHandler {
-                async fn approve_tool(&self, name: &str, details: &str) -> bool {
-                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<bool>();
-                    let _ = self.tx.send(AgentUpdate::ApprovalRequired {
-                        tool_name: name.to_string(),
-                        details: details.to_string(),
-                        tx: resp_tx,
-                    });
-                    resp_rx.await.unwrap_or(false)
-                }
-            }
-
-            let approval_handler = std::sync::Arc::new(TuiApprovalHandler {
-                tx: tx_clone.clone(),
-            });
-
             let mut event_loop =
                 forge_core::event_loop::EventLoop::new(provider, context, sandbox, task_clone)
                     .with_mcp_server()
-                    .with_approval_handler(approval_handler)
-                    .with_tool_policy(forge_core::event_loop::ToolPolicy {
-                        allow_writes: false,
-                        allow_commands: false,
-                    });
+                    .with_tool_policy(tool_policy);
+
+            if !auto_approve {
+                struct TuiApprovalHandler {
+                    tx: tokio::sync::mpsc::UnboundedSender<AgentUpdate>,
+                }
+                #[async_trait::async_trait]
+                impl forge_core::event_loop::ApprovalHandler for TuiApprovalHandler {
+                    async fn approve_tool(&self, name: &str, details: &str) -> bool {
+                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<bool>();
+                        let _ = self.tx.send(AgentUpdate::ApprovalRequired {
+                            tool_name: name.to_string(),
+                            details: details.to_string(),
+                            tx: resp_tx,
+                        });
+                        resp_rx.await.unwrap_or(false)
+                    }
+                }
+                let approval_handler = std::sync::Arc::new(TuiApprovalHandler {
+                    tx: tx_clone.clone(),
+                });
+                event_loop = event_loop.with_approval_handler(approval_handler);
+            }
 
             // Forward live loop events into the TUI update channel so the
             // conversation panel can show tool calls, output, and diffs as
@@ -1166,7 +1295,11 @@ impl SimpleTui {
                     self.handle_loop_event(event);
                     received = true;
                 }
-                Ok(AgentUpdate::ApprovalRequired { tool_name, details, tx }) => {
+                Ok(AgentUpdate::ApprovalRequired {
+                    tool_name,
+                    details,
+                    tx,
+                }) => {
                     self.pending_approval = Some(PendingApproval {
                         tool_name,
                         details,
@@ -1216,7 +1349,8 @@ impl SimpleTui {
             LoopEvent::AssistantMessageChunk { delta } => {
                 if !self.did_stream_chunk {
                     self.did_stream_chunk = true;
-                    self.conversation.push(ConversationEntry::Assistant(String::new()));
+                    self.conversation
+                        .push(ConversationEntry::Assistant(String::new()));
                 }
                 self.stream_queue.extend(delta.chars());
             }
@@ -1224,7 +1358,8 @@ impl SimpleTui {
                 if self.did_stream_chunk {
                     self.did_stream_chunk = false;
                 } else {
-                    self.conversation.push(ConversationEntry::Assistant(String::new()));
+                    self.conversation
+                        .push(ConversationEntry::Assistant(String::new()));
                     self.stream_queue.extend(content.chars());
                 }
             }
@@ -1265,15 +1400,26 @@ impl SimpleTui {
                 });
             }
             LoopEvent::VerifyResult { passed, logs } => {
-                self.active_agent_status = if passed { "Done (verified)".to_string() } else { "Failed verification".to_string() };
+                self.active_agent_status = if passed {
+                    "Done (verified)".to_string()
+                } else {
+                    "Failed verification".to_string()
+                };
                 self.add_entry(ConversationEntry::VerifyResult {
                     passed,
                     logs: truncate_for_display(&logs, 800),
                 });
             }
-            LoopEvent::TokensUsed { total, .. } => {
+            LoopEvent::TokensUsed {
+                prompt,
+                completion,
+                total,
+            } => {
                 self.token_used = total;
+                self.prompt_tokens = prompt;
+                self.completion_tokens = completion;
                 self.has_exact_tokens = true;
+                self.update_cost();
             }
         }
     }
@@ -1332,13 +1478,19 @@ impl SimpleTui {
         let mut conv_chars = 0;
         for entry in &self.conversation {
             match entry {
-                ConversationEntry::User(t) | ConversationEntry::Assistant(t) | ConversationEntry::System(t) => {
+                ConversationEntry::User(t)
+                | ConversationEntry::Assistant(t)
+                | ConversationEntry::System(t) => {
                     conv_chars += t.len();
                 }
                 ConversationEntry::ToolCall { name, result } => {
                     conv_chars += name.len() + result.len();
                 }
-                ConversationEntry::Diff { path, old_text, new_text } => {
+                ConversationEntry::Diff {
+                    path,
+                    old_text,
+                    new_text,
+                } => {
                     conv_chars += path.len() + old_text.len() + new_text.len();
                 }
                 ConversationEntry::VerifyResult { logs, .. } => {
@@ -1348,6 +1500,36 @@ impl SimpleTui {
         }
         // Base system prompt and tools definitions take ~3000 tokens
         self.token_used = 3000 + (conv_chars / 4) as u32;
+        self.update_cost();
+    }
+
+    fn update_cost(&mut self) {
+        let model = self.provider.model().to_lowercase();
+        // Determine input and output rates per 1,000,000 tokens
+        let (input_rate, output_rate) = if model.contains("claude-3-5") || model.contains("sonnet")
+        {
+            (3.00, 15.00)
+        } else if model.contains("gpt-4o") {
+            (2.50, 10.00)
+        } else if model.contains("gemini-1.5-pro") {
+            (1.25, 5.00)
+        } else if model.contains("glm") {
+            (1.00, 2.00)
+        } else if model.contains("mock") {
+            (0.00, 0.00)
+        } else {
+            // Safe fallback (GPT-4o rates)
+            (2.50, 10.00)
+        };
+
+        if self.has_exact_tokens {
+            self.cost = (self.prompt_tokens as f64 * input_rate
+                + self.completion_tokens as f64 * output_rate)
+                / 1_000_000.0;
+        } else {
+            // Estimate cost using the estimated tokens as input
+            self.cost = (self.token_used as f64 * input_rate) / 1_000_000.0;
+        }
     }
 
     fn previous_cursor_boundary(&self) -> usize {
@@ -1456,21 +1638,23 @@ impl SimpleTui {
         };
         if self.agent_running {
             format!(
-                " Mode: {} | Focus: {} | [WORKING...] | queued: {} | Tokens: {}/{}",
+                " Mode: {} | Focus: {} | [WORKING...] | queued: {} | Tokens: {}/{} | Cost: ${:.4}",
                 mode_str,
                 focus_str,
                 self.queued_messages.len(),
                 self.token_used,
-                self.token_budget
+                self.token_budget,
+                self.cost
             )
         } else {
             format!(
-                " Mode: {} | Focus: {} | Ready | queued: {} | Tokens: {}/{}",
+                " Mode: {} | Focus: {} | Ready | queued: {} | Tokens: {}/{} | Cost: ${:.4}",
                 mode_str,
                 focus_str,
                 self.queued_messages.len(),
                 self.token_used,
-                self.token_budget
+                self.token_budget,
+                self.cost
             )
         }
     }
@@ -1564,7 +1748,11 @@ impl SimpleTui {
         let default_style = Style::default().bg(self.theme_bg()).fg(self.theme_fg());
 
         // Main layout with banner (hidden/visible), content, status
-        let banner_height = if self.checkpoint_available.is_some() { 3 } else { 0 };
+        let banner_height = if self.checkpoint_available.is_some() {
+            3
+        } else {
+            0
+        };
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1587,7 +1775,11 @@ impl SimpleTui {
                         .border_style(Style::default().fg(Color::Yellow))
                         .title("Checkpoint Recovery"),
                 )
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+                .style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                );
             f.render_widget(banner_paragraph, main_chunks[0]);
         }
 
@@ -1613,9 +1805,9 @@ impl SimpleTui {
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),                 // Conversation
-                Constraint::Length(diff_height),    // Diff viewer
-                Constraint::Length(3),              // Input box
+                Constraint::Min(5),              // Conversation
+                Constraint::Length(diff_height), // Diff viewer
+                Constraint::Length(3),           // Input box
             ])
             .split(content_chunks[0]);
 
@@ -1625,26 +1817,58 @@ impl SimpleTui {
 
         for entry in &self.conversation {
             let label_span = match entry {
-                ConversationEntry::User(_) => {
-                    Span::styled(" 👤 YOU ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
-                }
-                ConversationEntry::Assistant(_) => {
-                    Span::styled(" 🤖 FORGE ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
-                }
-                ConversationEntry::System(_) => {
-                    Span::styled(" ⚙️ SYSTEM ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
-                }
-                ConversationEntry::ToolCall { name, .. } => {
-                    Span::styled(format!(" 🛠️ TOOL: {} ", name), Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD))
-                }
-                ConversationEntry::Diff { path, .. } => {
-                    Span::styled(format!(" 📁 DIFF: {} ", path), Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
-                }
+                ConversationEntry::User(_) => Span::styled(
+                    " 👤 YOU ",
+                    Style::default()
+                        .bg(Color::Cyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                ConversationEntry::Assistant(_) => Span::styled(
+                    " 🤖 FORGE ",
+                    Style::default()
+                        .bg(Color::Green)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                ConversationEntry::System(_) => Span::styled(
+                    " ⚙️ SYSTEM ",
+                    Style::default()
+                        .bg(Color::Yellow)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                ConversationEntry::ToolCall { name, .. } => Span::styled(
+                    format!(" 🛠️ TOOL: {} ", name),
+                    Style::default()
+                        .bg(Color::Magenta)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                ConversationEntry::Diff { path, .. } => Span::styled(
+                    format!(" 📁 DIFF: {} ", path),
+                    Style::default()
+                        .bg(Color::Yellow)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 ConversationEntry::VerifyResult { passed, .. } => {
                     if *passed {
-                        Span::styled(" 🧪 VERIFIED ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
+                        Span::styled(
+                            " 🧪 VERIFIED ",
+                            Style::default()
+                                .bg(Color::Green)
+                                .fg(Color::Black)
+                                .add_modifier(Modifier::BOLD),
+                        )
                     } else {
-                        Span::styled(" 🧪 FAILED ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD))
+                        Span::styled(
+                            " 🧪 FAILED ",
+                            Style::default()
+                                .bg(Color::Red)
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        )
                     }
                 }
             };
@@ -1659,7 +1883,10 @@ impl SimpleTui {
             };
 
             let mut lines = Vec::new();
-            if let ConversationEntry::Diff { old_text, new_text, .. } = entry {
+            if let ConversationEntry::Diff {
+                old_text, new_text, ..
+            } = entry
+            {
                 lines.push(format!("- {}", old_text));
                 lines.push(format!("+ {}", new_text));
             } else {
@@ -1674,16 +1901,22 @@ impl SimpleTui {
                 ConversationEntry::System(_) => 10,
                 ConversationEntry::ToolCall { name, .. } => 8 + name.chars().count(),
                 ConversationEntry::Diff { path, .. } => 8 + path.chars().count(),
-                ConversationEntry::VerifyResult { passed, .. } => if *passed { 12 } else { 10 },
+                ConversationEntry::VerifyResult { passed, .. } => {
+                    if *passed {
+                        12
+                    } else {
+                        10
+                    }
+                }
             };
-            let line_width = (left_chunks[0].width.saturating_sub(6) as usize)
-                .saturating_sub(badge_width);
+            let line_width =
+                (left_chunks[0].width.saturating_sub(6) as usize).saturating_sub(badge_width);
             let line_str = "─".repeat(line_width);
 
             // Header line for each message
             let header_line = Line::from(vec![
                 label_span.clone(),
-                Span::styled(format!(" {line_str}"), Style::default().fg(Color::DarkGray))
+                Span::styled(format!(" {line_str}"), Style::default().fg(Color::DarkGray)),
             ]);
             conversation_lines.push(header_line);
 
@@ -1695,15 +1928,17 @@ impl SimpleTui {
                     if in_code_block {
                         let top_line_width = pane_width.saturating_sub(13);
                         let top_line = "─".repeat(top_line_width);
-                        conversation_lines.push(Line::from(vec![
-                            Span::styled(format!("  ┌── CODE {top_line}"), Style::default().fg(Color::DarkGray))
-                        ]));
+                        conversation_lines.push(Line::from(vec![Span::styled(
+                            format!("  ┌── CODE {top_line}"),
+                            Style::default().fg(Color::DarkGray),
+                        )]));
                     } else {
                         let bottom_line_width = pane_width.saturating_sub(3);
                         let bottom_line = "─".repeat(bottom_line_width);
-                        conversation_lines.push(Line::from(vec![
-                            Span::styled(format!("  └{bottom_line}"), Style::default().fg(Color::DarkGray))
-                        ]));
+                        conversation_lines.push(Line::from(vec![Span::styled(
+                            format!("  └{bottom_line}"),
+                            Style::default().fg(Color::DarkGray),
+                        )]));
                     }
                     continue;
                 }
@@ -1711,12 +1946,12 @@ impl SimpleTui {
                 if in_code_block {
                     conversation_lines.push(Line::from(vec![
                         Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(line, Style::default().fg(Color::White))
+                        Span::styled(line, Style::default().fg(Color::White)),
                     ]));
                 } else {
                     conversation_lines.push(Line::from(vec![
                         Span::styled("  ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(line, Style::default().fg(Color::White))
+                        Span::styled(line, Style::default().fg(Color::White)),
                     ]));
                 }
             }
@@ -1738,7 +1973,8 @@ impl SimpleTui {
             .rev()
             .collect();
 
-        let conv_border_style = Style::default().fg(self.theme_border(self.focus == Focus::Conversation));
+        let conv_border_style =
+            Style::default().fg(self.theme_border(self.focus == Focus::Conversation));
         let conv_title = if self.focus == Focus::Conversation {
             " 💬 Conversation [Focus: Esc/Tab to switch] "
         } else {
@@ -1772,29 +2008,38 @@ impl SimpleTui {
                 };
 
                 let header_text = format!(" 📁 {} @ {}", hunk.file_path, hunk.header);
-                
+
                 // Combine header text and state
                 let state_len = state_str.len() + 4; // "[PENDING]" or similar
                 let max_header_len = inner_width.saturating_sub(state_len + 4);
                 let truncated_header = if header_text.chars().count() > max_header_len {
-                    header_text.chars().take(max_header_len - 1).collect::<String>() + "…"
+                    header_text
+                        .chars()
+                        .take(max_header_len - 1)
+                        .collect::<String>()
+                        + "…"
                 } else {
                     header_text
                 };
-                
-                let spaces_count = inner_width.saturating_sub(truncated_header.chars().count() + state_len);
+
+                let spaces_count =
+                    inner_width.saturating_sub(truncated_header.chars().count() + state_len);
                 let spaces = " ".repeat(spaces_count);
                 let full_header_line = format!("{}{}[{}]  ", truncated_header, spaces, state_str);
 
                 let header_style = if is_selected {
-                    Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .bg(Color::Cyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().bg(Color::DarkGray).fg(Color::White)
                 };
 
-                diff_lines.push(Line::from(vec![
-                    Span::styled(full_header_line, header_style)
-                ]));
+                diff_lines.push(Line::from(vec![Span::styled(
+                    full_header_line,
+                    header_style,
+                )]));
 
                 for removal in hunk.removals.iter().take(2) {
                     diff_lines.push(Line::from(vec![
@@ -1821,11 +2066,12 @@ impl SimpleTui {
                         Style::default().fg(Color::DarkGray),
                     )]));
                 }
-                
+
                 diff_lines.push(Line::from(""));
             }
 
-            let diff_border_style = Style::default().fg(self.theme_border(self.focus == Focus::Diff));
+            let diff_border_style =
+                Style::default().fg(self.theme_border(self.focus == Focus::Diff));
             let diff_title = if self.focus == Focus::Diff {
                 " 🔍 Diff Viewer [↑↓: select, Enter/a: approve, r: reject, Esc: back] "
             } else {
@@ -1845,20 +2091,28 @@ impl SimpleTui {
 
         // 3. Render Input Box
         if let Some(pending) = &self.pending_approval {
-            let details_display = truncate_for_display(&pending.details, size.width.saturating_sub(65) as usize);
+            let details_display =
+                truncate_for_display(&pending.details, size.width.saturating_sub(65) as usize);
             let prompt_text = format!(
-                "  Agent wants to run: {} ({})? Press [y] to Approve, [n] to Reject",
-                pending.tool_name,
-                details_display
+                "  Agent wants to run: {} ({})? [y] approve  [n] reject  [a] always",
+                pending.tool_name, details_display
             );
             let prompt_paragraph = Paragraph::new(prompt_text)
                 .block(
                     Block::default()
                         .borders(Borders::TOP)
-                        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                        .border_style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )
                         .title(" ⚠️  Interactive Tool Approval Required "),
                 )
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+                .style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                );
             f.render_widget(prompt_paragraph, left_chunks[2]);
         } else {
             let input_border_style = if self.focus == Focus::Input {
@@ -1881,30 +2135,41 @@ impl SimpleTui {
             };
             let input_paragraph = Paragraph::new(Line::from(vec![
                 Span::raw("  "),
-                Span::raw(self.input.as_str())
+                Span::raw(self.input.as_str()),
             ]))
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .border_style(input_border_style)
-                        .title(input_title),
-                )
-                .style(default_style);
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(input_border_style)
+                    .title(input_title),
+            )
+            .style(default_style);
             f.render_widget(input_paragraph, left_chunks[2]);
             if self.focus == Focus::Input && !self.agent_running && !self.connect_popup.active {
-                f.set_cursor(left_chunks[2].x + self.cursor as u16 + 2, left_chunks[2].y + 1);
+                f.set_cursor(
+                    left_chunks[2].x + self.cursor as u16 + 2,
+                    left_chunks[2].y + 1,
+                );
             }
         }
 
         // 5. Render Status Bar
         let mode_str = if self.plan_mode { "PLAN" } else { "BUILD" };
-        let mode_color = if self.plan_mode { Color::Yellow } else { Color::Green };
+        let mode_color = if self.plan_mode {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
         let focus_str = match self.focus {
             Focus::Input => "INPUT",
             Focus::Diff => "DIFF",
             Focus::Conversation => "CHAT",
         };
-        let status_color = if self.agent_running { Color::Yellow } else { Color::Green };
+        let status_color = if self.agent_running {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
         let status_str = if self.agent_running {
             format!("WORKING ({})", self.active_agent_status)
         } else {
@@ -1912,19 +2177,74 @@ impl SimpleTui {
         };
 
         let mut status_spans = vec![
-            Span::styled(" ⚡ MODE: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {} ", mode_str), Style::default().bg(mode_color).fg(Color::Black).add_modifier(Modifier::BOLD)),
-            Span::styled(" │ 🎯 FOCUS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {} ", focus_str), Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
-            Span::styled(" │ 🟢 STATUS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {} ", status_str), Style::default().bg(status_color).fg(Color::Black).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ⚡ MODE: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} ", mode_str),
+                Style::default()
+                    .bg(mode_color)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " │ 🎯 FOCUS: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} ", focus_str),
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " │ 🟢 STATUS: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} ", status_str),
+                Style::default()
+                    .bg(status_color)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ];
 
         if self.agent_running {
-            status_spans.push(Span::styled(" │ ⏳ TIME: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
-            status_spans.push(Span::styled(format!(" {}s ", self.elapsed_seconds), Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD)));
-            status_spans.push(Span::styled(" │ 🛠️ TOOLS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
-            status_spans.push(Span::styled(format!(" {} ", self.tool_calls_count), Style::default().bg(Color::Magenta).fg(Color::Black).add_modifier(Modifier::BOLD)));
+            status_spans.push(Span::styled(
+                " │ ⏳ TIME: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            status_spans.push(Span::styled(
+                format!(" {}s ", self.elapsed_seconds),
+                Style::default()
+                    .bg(Color::Yellow)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            status_spans.push(Span::styled(
+                " │ 🛠️ TOOLS: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            status_spans.push(Span::styled(
+                format!(" {} ", self.tool_calls_count),
+                Style::default()
+                    .bg(Color::Magenta)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
 
         let ratio = if self.token_budget > 0 {
@@ -1941,18 +2261,47 @@ impl SimpleTui {
         };
 
         status_spans.extend(vec![
-            Span::styled(" │ 📥 QUEUED: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {} ", self.queued_messages.len()), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(" │ 🪙 TOKENS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " │ 📥 QUEUED: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} ", self.queued_messages.len()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " │ 🪙 TOKENS: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 format!(" {}/{} ", self.token_used, self.token_budget),
-                Style::default().fg(token_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(token_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " │ 💵 COST: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" ${:.4} ", self.cost),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]);
 
         let line = Line::from(status_spans);
-        let status_bar = Paragraph::new(line)
-            .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        let status_bar =
+            Paragraph::new(line).style(Style::default().bg(Color::DarkGray).fg(Color::White));
         f.render_widget(status_bar, main_chunks[2]);
 
         self.render_autocomplete_popup(f, left_chunks[2]);
@@ -1984,25 +2333,48 @@ impl SimpleTui {
 
         // Header
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", spinner), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("AGENT ENGINE STATUS", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {} ", spinner),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "AGENT ENGINE STATUS",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled(" ────────────────────────────────────────", Style::default().fg(Color::DarkGray)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            " ────────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )]));
         lines.push(Line::from(""));
 
         // Active task section
         if self.agent_running {
             lines.push(Line::from(vec![
-                Span::styled(" ⚡ RUNNING ", Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ⚡ RUNNING ",
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
-                Span::styled("Active Steer Task", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Active Steer Task",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
             lines.push(Line::from(""));
-            
+
             if let Some(task) = &self.active_agent_task {
-                let display_task = truncate_for_display(task, area.width.saturating_sub(12) as usize);
+                let display_task =
+                    truncate_for_display(task, area.width.saturating_sub(12) as usize);
                 lines.push(Line::from(vec![
                     Span::styled("    Task: ", Style::default().fg(Color::DarkGray)),
                     Span::styled(display_task, Style::default().fg(Color::White)),
@@ -2011,19 +2383,30 @@ impl SimpleTui {
 
             lines.push(Line::from(vec![
                 Span::styled("  Status: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(&self.active_agent_status, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    &self.active_agent_status,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
 
             lines.push(Line::from(vec![
                 Span::styled(" Elapsed: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}s", self.elapsed_seconds), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{}s", self.elapsed_seconds),
+                    Style::default().fg(Color::Gray),
+                ),
             ]));
 
             lines.push(Line::from(vec![
                 Span::styled("   Tools: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(self.tool_calls_count.to_string(), Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    self.tool_calls_count.to_string(),
+                    Style::default().fg(Color::Magenta),
+                ),
             ]));
-            
+
             lines.push(Line::from(""));
 
             // Progress bar
@@ -2036,12 +2419,8 @@ impl SimpleTui {
                 };
                 let filled = (ratio * progress_width as f32) as usize;
                 let empty = progress_width.saturating_sub(filled);
-                
-                let progress_bar_content = format!(
-                    "{}{}",
-                    "█".repeat(filled),
-                    "░".repeat(empty)
-                );
+
+                let progress_bar_content = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(progress_bar_content, Style::default().fg(Color::Blue)),
@@ -2049,40 +2428,64 @@ impl SimpleTui {
             }
         } else {
             lines.push(Line::from(vec![
-                Span::styled(" ○ IDLE ", Style::default().bg(Color::DarkGray).fg(Color::White)),
+                Span::styled(
+                    " ○ IDLE ",
+                    Style::default().bg(Color::DarkGray).fg(Color::White),
+                ),
                 Span::raw(" "),
                 Span::styled("Waiting for input", Style::default().fg(Color::DarkGray)),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("  No active agent tasks running.", Style::default().fg(Color::DarkGray)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "  No active agent tasks running.",
+                Style::default().fg(Color::DarkGray),
+            )]));
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled(" ────────────────────────────────────────", Style::default().fg(Color::DarkGray)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            " ────────────────────────────────────────",
+            Style::default().fg(Color::DarkGray),
+        )]));
         lines.push(Line::from(""));
 
         // Queued tasks section
         lines.push(Line::from(vec![
-            Span::styled(" 📋 QUEUE ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " 📋 QUEUE ",
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
-            Span::styled("Pending Task List", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" [{}]", self.queued_messages.len()), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "Pending Task List",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" [{}]", self.queued_messages.len()),
+                Style::default().fg(Color::Yellow),
+            ),
         ]));
         lines.push(Line::from(""));
 
         if self.queued_messages.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("  No tasks in queue.", Style::default().fg(Color::DarkGray)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "  No tasks in queue.",
+                Style::default().fg(Color::DarkGray),
+            )]));
         } else {
             for (idx, task) in self.queued_messages.iter().enumerate() {
-                let display_task = truncate_for_display(task, area.width.saturating_sub(8) as usize);
+                let display_task =
+                    truncate_for_display(task, area.width.saturating_sub(8) as usize);
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {}. ", idx + 1), Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("  {}. ", idx + 1),
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::styled(display_task, Style::default().fg(Color::Gray)),
                 ]));
             }
@@ -2094,9 +2497,10 @@ impl SimpleTui {
             for _ in 0..available_height.saturating_sub(1) {
                 lines.push(Line::from(""));
             }
-            lines.push(Line::from(vec![
-                Span::styled("  [Ctrl-P] Toggle Panel", Style::default().fg(Color::DarkGray)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "  [Ctrl-P] Toggle Panel",
+                Style::default().fg(Color::DarkGray),
+            )]));
         }
 
         let panel_border_style = Style::default().fg(Color::DarkGray);
@@ -2116,7 +2520,7 @@ impl SimpleTui {
         if !self.connect_popup.active {
             return;
         }
-        
+
         let size = f.size();
         let popup_area = {
             let width = 60.min(size.width);
@@ -2126,18 +2530,21 @@ impl SimpleTui {
             let rect = ratatui::layout::Rect::new(x, y, width, height);
             rect
         };
-        
+
         f.render_widget(ratatui::widgets::Clear, popup_area);
-        
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::White))
             .title(" 🔌 CONNECTION SETTINGS (OpenCode Mode) ");
-            
+
         f.render_widget(block, popup_area);
-        
-        let inner_area = popup_area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 2 });
-        
+
+        let inner_area = popup_area.inner(ratatui::layout::Margin {
+            vertical: 1,
+            horizontal: 2,
+        });
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -2146,7 +2553,7 @@ impl SimpleTui {
                 Constraint::Min(2),    // Instructions
             ])
             .split(inner_area);
-            
+
         let row_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -2154,13 +2561,15 @@ impl SimpleTui {
                 Constraint::Percentage(50), // Models
             ])
             .split(chunks[0]);
-            
+
         let item_width = (row_chunks[0].width.saturating_sub(2)) as usize;
 
         // 1. Render Providers List
         let is_provider_active = self.connect_popup.active_field == ConnectPopupField::Provider;
         let provider_border_style = if is_provider_active {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -2172,12 +2581,24 @@ impl SimpleTui {
         let mut provider_spans = Vec::new();
         for (idx, p) in self.connect_popup.providers.iter().enumerate() {
             let is_selected = idx == self.connect_popup.selected_provider_idx;
-            
+
             let (prefix, style) = if is_selected {
                 if is_provider_active {
-                    ("▶ ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+                    (
+                        "▶ ",
+                        Style::default()
+                            .bg(Color::Cyan)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    ("➔ ", Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))
+                    (
+                        "➔ ",
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 }
             } else {
                 if is_provider_active {
@@ -2186,7 +2607,7 @@ impl SimpleTui {
                     ("  ", Style::default().fg(Color::DarkGray))
                 }
             };
-            
+
             let item_text = format!("{prefix}{p}");
             let padded_text = if item_text.chars().count() < item_width {
                 let padding = " ".repeat(item_width - item_text.chars().count());
@@ -2194,19 +2615,23 @@ impl SimpleTui {
             } else {
                 item_text
             };
-            
-            provider_spans.push(Line::from(vec![
-                Span::styled(padded_text, style)
-            ]));
+
+            provider_spans.push(Line::from(vec![Span::styled(padded_text, style)]));
         }
-        let provider_list = Paragraph::new(provider_spans)
-            .block(Block::default().borders(Borders::ALL).border_style(provider_border_style).title(provider_title));
+        let provider_list = Paragraph::new(provider_spans).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(provider_border_style)
+                .title(provider_title),
+        );
         f.render_widget(provider_list, row_chunks[0]);
-        
+
         // 2. Render Models List
         let is_model_active = self.connect_popup.active_field == ConnectPopupField::Model;
         let model_border_style = if is_model_active {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -2218,12 +2643,24 @@ impl SimpleTui {
         let mut model_spans = Vec::new();
         for (idx, m) in self.connect_popup.models.iter().enumerate() {
             let is_selected = idx == self.connect_popup.selected_model_idx;
-            
+
             let (prefix, style) = if is_selected {
                 if is_model_active {
-                    ("▶ ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+                    (
+                        "▶ ",
+                        Style::default()
+                            .bg(Color::Cyan)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    ("➔ ", Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))
+                    (
+                        "➔ ",
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 }
             } else {
                 if is_model_active {
@@ -2232,7 +2669,7 @@ impl SimpleTui {
                     ("  ", Style::default().fg(Color::DarkGray))
                 }
             };
-            
+
             let item_text = format!("{prefix}{m}");
             let padded_text = if item_text.chars().count() < item_width {
                 let padding = " ".repeat(item_width - item_text.chars().count());
@@ -2240,23 +2677,27 @@ impl SimpleTui {
             } else {
                 item_text
             };
-            
-            model_spans.push(Line::from(vec![
-                Span::styled(padded_text, style)
-            ]));
+
+            model_spans.push(Line::from(vec![Span::styled(padded_text, style)]));
         }
-        let model_list = Paragraph::new(model_spans)
-            .block(Block::default().borders(Borders::ALL).border_style(model_border_style).title(model_title));
+        let model_list = Paragraph::new(model_spans).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(model_border_style)
+                .title(model_title),
+        );
         f.render_widget(model_list, row_chunks[1]);
-        
+
         // 3. Render Api Key Field
         let is_api_active = self.connect_popup.active_field == ConnectPopupField::ApiKey;
         let api_key_border_style = if is_api_active {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        
+
         let api_key_title = if self.connect_popup.api_key.is_empty() {
             if is_api_active {
                 " 🔑 API KEY (Type API Key) "
@@ -2280,38 +2721,59 @@ impl SimpleTui {
         } else {
             "*".repeat(self.connect_popup.api_key.len())
         };
-        
+
         let api_key_style = if self.connect_popup.api_key.is_empty() {
             Style::default().fg(Color::DarkGray)
         } else {
             Style::default().fg(Color::White)
         };
 
-        let api_key_paragraph = Paragraph::new(Line::from(vec![
-            Span::styled(api_key_display, api_key_style)
-        ]))
-        .block(Block::default().borders(Borders::ALL).border_style(api_key_border_style).title(api_key_title));
+        let api_key_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+            api_key_display,
+            api_key_style,
+        )]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(api_key_border_style)
+                .title(api_key_title),
+        );
         f.render_widget(api_key_paragraph, chunks[1]);
-        
+
         // 4. Render Instructions
         let instructions = vec![
             Line::from(vec![
                 Span::styled(" Nav: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("[Tab]/[Shift-Tab]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[Tab]/[Shift-Tab]",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" │ Select: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("[Up/Down]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[Up/Down]",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
                 Span::styled(" Connect: ", Style::default().fg(Color::DarkGray)),
-                Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[Enter]",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" │ Cancel: ", Style::default().fg(Color::DarkGray)),
                 Span::styled("[Esc]", Style::default().fg(Color::Red)),
-            ])
+            ]),
         ];
-        let instructions_paragraph = Paragraph::new(instructions)
-            .alignment(ratatui::layout::Alignment::Center);
+        let instructions_paragraph =
+            Paragraph::new(instructions).alignment(ratatui::layout::Alignment::Center);
         f.render_widget(instructions_paragraph, chunks[2]);
-        
+
         if is_api_active {
             let cursor_x = chunks[1].x + self.connect_popup.api_key.len() as u16 + 1;
             let cursor_y = chunks[1].y + 1;
@@ -2327,7 +2789,7 @@ impl SimpleTui {
         }
 
         let input_trimmed = self.input.trim_start();
-        
+
         let path_commands = ["/context add ", "/context remove ", "/diff ", "/review "];
         let mut matched_cmd = None;
         for cmd in &path_commands {
@@ -2419,21 +2881,22 @@ impl SimpleTui {
         for (i, opt) in self.autocomplete_options.iter().enumerate() {
             let is_selected = i == self.autocomplete_index;
             let style = if is_selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
-            
+
             let padded_opt = if opt.chars().count() < item_width {
                 let padding = " ".repeat(item_width - opt.chars().count());
                 format!("{opt}{padding}")
             } else {
                 opt.clone()
             };
-            
-            lines.push(Line::from(vec![
-                Span::styled(padded_opt, style)
-            ]));
+
+            lines.push(Line::from(vec![Span::styled(padded_opt, style)]));
         }
 
         let block = Block::default()
@@ -2472,6 +2935,25 @@ mod tests {
 
         fn model(&self) -> &str {
             "mock"
+        }
+    }
+
+    struct CustomMockProvider {
+        model_name: String,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CustomMockProvider {
+        async fn chat(&self, _messages: &[Message]) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                content: "done".to_string(),
+                tool_calls: vec![],
+                usage: None,
+            })
+        }
+
+        fn model(&self) -> &str {
+            &self.model_name
         }
     }
 
@@ -2579,14 +3061,14 @@ mod tests {
             step: 0,
             content: "hello world".to_string(),
         });
-        
+
         assert_eq!(tui.conversation.len(), 1);
         if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
             assert!(text.is_empty());
         } else {
             panic!("Expected Assistant entry");
         }
-        
+
         tui.poll_agent_updates().await;
         if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
             assert_eq!(text, "hello wo");
@@ -2606,11 +3088,11 @@ mod tests {
     async fn test_real_streaming() {
         let mut tui = test_tui();
         use forge_core::LoopEvent;
-        
+
         tui.handle_loop_event(LoopEvent::AssistantMessageChunk {
             delta: "hello ".to_string(),
         });
-        
+
         assert_eq!(tui.conversation.len(), 1);
         if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
             assert!(text.is_empty());
@@ -2654,10 +3136,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_streaming_and_approval_combined() {
+        let mut tui = test_tui();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tui.agent_rx = Some(rx);
+
+        tx.send(AgentUpdate::Progress(
+            forge_core::LoopEvent::AssistantMessageChunk {
+                delta: "analyzing ".into(),
+            },
+        ))
+        .unwrap();
+        tx.send(AgentUpdate::Progress(
+            forge_core::LoopEvent::AssistantMessageChunk {
+                delta: "code".into(),
+            },
+        ))
+        .unwrap();
+
+        // Poll multiple times to ensure the streamed text is fully drained
+        for _ in 0..5 {
+            tui.poll_agent_updates().await;
+        }
+
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert_eq!(text, "analyzing code");
+        } else {
+            panic!("expected assistant entry");
+        }
+
+        let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
+        tx.send(AgentUpdate::ApprovalRequired {
+            tool_name: "write_file".into(),
+            details: "src/main.rs".into(),
+            tx: approval_tx,
+        })
+        .unwrap();
+
+        tui.poll_agent_updates().await;
+        assert!(tui.pending_approval.is_some());
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert!(!text.is_empty(), "stream visible before approval gate");
+        }
+
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
+            .await;
+        assert!(tui.pending_approval.is_none());
+        assert!(approval_rx.await.unwrap());
+
+        tui.poll_agent_updates().await;
+        if let ConversationEntry::Assistant(ref text) = tui.conversation[0] {
+            assert_eq!(text, "analyzing code");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_interactive_approval_always_key() {
+        let mut tui = test_tui();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tui.agent_rx = Some({
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = event_tx.send(AgentUpdate::ApprovalRequired {
+                tool_name: "run_command".to_string(),
+                details: "cargo test".to_string(),
+                tx,
+            });
+            event_rx
+        });
+
+        tui.poll_agent_updates().await;
+        assert!(!tui.approve_session);
+
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()))
+            .await;
+
+        assert!(tui.approve_session);
+        assert!(tui.pending_approval.is_none());
+        assert!(rx.await.unwrap());
+        assert!(tui.auto_approve_tools());
+    }
+
+    #[tokio::test]
+    async fn test_yolo_skips_approval_gate() {
+        let config = TuiConfig {
+            yolo: true,
+            ..TuiConfig::default()
+        };
+        let tui = SimpleTui::new(config, Arc::new(MockProvider));
+        assert!(tui.auto_approve_tools());
+        assert!(tui.tool_policy().allow_writes);
+        assert!(tui.tool_policy().allow_commands);
+    }
+
+    #[tokio::test]
     async fn test_interactive_approval_y_key() {
         let mut tui = test_tui();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        
+
         tui.agent_rx = Some({
             let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
             let _ = event_tx.send(AgentUpdate::ApprovalRequired {
@@ -2669,14 +3245,14 @@ mod tests {
         });
 
         tui.poll_agent_updates().await;
-        
+
         assert!(tui.pending_approval.is_some());
-        
+
         tui.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
             .await;
-            
+
         assert!(tui.pending_approval.is_none());
-        
+
         let approved = rx.await.unwrap();
         assert!(approved);
     }
@@ -2685,7 +3261,7 @@ mod tests {
     async fn test_interactive_approval_n_key() {
         let mut tui = test_tui();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        
+
         tui.agent_rx = Some({
             let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
             let _ = event_tx.send(AgentUpdate::ApprovalRequired {
@@ -2697,16 +3273,81 @@ mod tests {
         });
 
         tui.poll_agent_updates().await;
-        
+
         assert!(tui.pending_approval.is_some());
-        
+
         tui.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()))
             .await;
-            
+
         assert!(tui.pending_approval.is_none());
-        
+
         let approved = rx.await.unwrap();
         assert!(!approved);
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_incremental_tokens_and_approval() {
+        let provider = Arc::new(CustomMockProvider {
+            model_name: "claude-3-5-sonnet".to_string(),
+        });
+        let mut tui = SimpleTui::new(TuiConfig::default(), provider);
+
+        let (update_tx, update_rx) = tokio::sync::mpsc::unbounded_channel();
+        tui.agent_rx = Some(update_rx);
+
+        // 1. Push initial token usage
+        update_tx
+            .send(AgentUpdate::Progress(forge_core::LoopEvent::TokensUsed {
+                prompt: 1000,
+                completion: 500,
+                total: 1500,
+            }))
+            .unwrap();
+
+        tui.poll_agent_updates().await;
+
+        assert_eq!(tui.token_used, 1500);
+        assert!(tui.has_exact_tokens);
+        // Cost: (1000 * 3.0 + 500 * 15.0) / 1,000,000 = 0.0105
+        assert!((tui.cost - 0.0105).abs() < 1e-6);
+
+        // 2. Push incremental token update
+        update_tx
+            .send(AgentUpdate::Progress(forge_core::LoopEvent::TokensUsed {
+                prompt: 2000,
+                completion: 1000,
+                total: 3000,
+            }))
+            .unwrap();
+
+        tui.poll_agent_updates().await;
+
+        assert_eq!(tui.token_used, 3000);
+        // Cost: (2000 * 3.0 + 1000 * 15.0) / 1,000,000 = 0.021
+        assert!((tui.cost - 0.021).abs() < 1e-6);
+
+        // 3. Push approval request
+        let (approval_tx, approval_rx) = tokio::sync::oneshot::channel();
+        update_tx
+            .send(AgentUpdate::ApprovalRequired {
+                tool_name: "test_tool".to_string(),
+                details: "run test".to_string(),
+                tx: approval_tx,
+            })
+            .unwrap();
+
+        tui.poll_agent_updates().await;
+
+        // Verify TUI is blocked on approval
+        assert!(tui.pending_approval.is_some());
+
+        // Approve
+        tui.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
+            .await;
+
+        assert!(tui.pending_approval.is_none());
+        let approved = approval_rx.await.unwrap();
+        assert!(approved);
     }
 
     #[tokio::test]
@@ -2722,7 +3363,7 @@ mod tests {
         // Pressing Enter on complete command (no trailing space/slash) should execute it immediately
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
-        
+
         assert!(tui.plan_mode); // /plan toggles plan mode
         assert!(tui.input.is_empty());
         assert!(tui.autocomplete_options.is_empty());
@@ -2731,12 +3372,16 @@ mod tests {
         tui.input = "/model".to_string();
         tui.cursor = tui.input.len();
         tui.update_autocomplete_options();
-        
+
         // Find "/model " (ends with space)
-        if let Some(pos) = tui.autocomplete_options.iter().position(|opt| opt == "/model ") {
+        if let Some(pos) = tui
+            .autocomplete_options
+            .iter()
+            .position(|opt| opt == "/model ")
+        {
             tui.autocomplete_index = pos;
         }
-        
+
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
         assert_eq!(tui.input, "/model ");
@@ -2755,7 +3400,7 @@ mod tests {
         tui.cursor = tui.input.len();
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
-        
+
         assert!(tui.plan_mode); // plan mode toggled immediately
         assert!(tui.queued_messages.is_empty()); // not queued
 
@@ -2771,7 +3416,7 @@ mod tests {
         tui.cursor = tui.input.len();
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
-        
+
         assert!(tui.connect_popup.active); // popup opened immediately
         assert_eq!(tui.queued_messages.len(), 1); // no new items queued
     }
@@ -2779,12 +3424,13 @@ mod tests {
     #[tokio::test]
     async fn test_token_count_not_overwritten() {
         let mut tui = test_tui();
-        tui.conversation.push(ConversationEntry::User("short message".to_string()));
-        
+        tui.conversation
+            .push(ConversationEntry::User("short message".to_string()));
+
         // Before exact token count is received, update_token_count estimates it
         tui.update_token_count();
         assert!(tui.token_used > 3000); // 3000 base + estimate
-        
+
         // Receive exact token count
         tui.handle_loop_event(forge_core::LoopEvent::TokensUsed {
             prompt: 100,
@@ -2797,59 +3443,90 @@ mod tests {
         // Submitting/updating conv should not overwrite
         tui.update_token_count();
         assert_eq!(tui.token_used, 150); // Kept!
-        
+
         // Starting a new task should reset it
         tui.start_agent_task("new task".to_string());
         assert!(!tui.has_exact_tokens);
     }
 
     #[tokio::test]
+    async fn test_cost_calculation() {
+        let provider = Arc::new(CustomMockProvider {
+            model_name: "claude-3-5-sonnet".to_string(),
+        });
+        let mut tui = SimpleTui::new(TuiConfig::default(), provider);
+
+        // Receive exact token count
+        tui.handle_loop_event(forge_core::LoopEvent::TokensUsed {
+            prompt: 1000,    // $3.00 per 1M -> $0.003
+            completion: 500, // $15.00 per 1M -> $0.0075
+            total: 1500,
+        });
+
+        // Exact cost: (1000 * 3.0 + 500 * 15.0) / 1_000_000 = 0.0105
+        assert!((tui.cost - 0.0105).abs() < 1e-6);
+
+        // Now test GPT-4o
+        let provider_gpt = Arc::new(CustomMockProvider {
+            model_name: "gpt-4o".to_string(),
+        });
+        let mut tui_gpt = SimpleTui::new(TuiConfig::default(), provider_gpt);
+        tui_gpt.handle_loop_event(forge_core::LoopEvent::TokensUsed {
+            prompt: 1000,    // $2.50 per 1M -> $0.0025
+            completion: 500, // $10.00 per 1M -> $0.005
+            total: 1500,
+        });
+        // Exact cost: (1000 * 2.5 + 500 * 10.0) / 1_000_000 = 0.0075
+        assert!((tui_gpt.cost - 0.0075).abs() < 1e-6);
+    }
+
+    #[tokio::test]
     async fn test_slash_command_model_and_connect() {
         let mut tui = test_tui();
-        
+
         // Test switching to a model in the catalog (will use mock provider info)
         tui.input = "/model mock".to_string();
         tui.cursor = tui.input.len();
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
-            
+
         assert_eq!(tui.provider.model(), "mock");
-        
+
         // Test connect to mock provider explicitly
         tui.input = "/connect mock mock-model".to_string();
         tui.cursor = tui.input.len();
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
-            
+
         assert_eq!(tui.provider.model(), "mock-model");
     }
 
     #[tokio::test]
     async fn test_interactive_connect_popup_navigation() {
         let mut tui = test_tui();
-        
+
         // Execute /connect without args to open the popup
         tui.input = "/connect".to_string();
         tui.cursor = tui.input.len();
         tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
             .await;
-            
+
         assert!(tui.connect_popup.active);
         assert_eq!(tui.connect_popup.active_field, ConnectPopupField::Provider);
-        
+
         // Switch field to Model
         tui.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()))
             .await;
         assert_eq!(tui.connect_popup.active_field, ConnectPopupField::Model);
-        
+
         // Switch field to ApiKey
         tui.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()))
             .await;
         assert_eq!(tui.connect_popup.active_field, ConnectPopupField::ApiKey);
-        
+
         // Clear any configuration-loaded default API key for deterministic test execution
         tui.connect_popup.api_key.clear();
-        
+
         // Type some keys for API key
         tui.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()))
             .await;
@@ -2858,12 +3535,12 @@ mod tests {
         tui.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()))
             .await;
         assert_eq!(tui.connect_popup.api_key, "key");
-        
+
         // Backspace
         tui.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()))
             .await;
         assert_eq!(tui.connect_popup.api_key, "ke");
-        
+
         // Escape cancels
         tui.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()))
             .await;
@@ -2873,15 +3550,15 @@ mod tests {
     #[tokio::test]
     async fn test_yoga_layout_toggling_and_resizing() {
         let mut tui = test_tui();
-        
+
         // Default: show_agent_panel is false (from config)
         assert!(!tui.show_agent_panel);
-        
+
         // Toggle via Ctrl-P keybinding
         tui.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
             .await;
         assert!(tui.show_agent_panel);
-        
+
         // Toggle via slash command /agents toggle
         tui.input = "/agents toggle".to_string();
         tui.cursor = tui.input.len();
@@ -2897,7 +3574,7 @@ mod tests {
             additions: vec!["new".to_string()],
             state: HunkState::Pending,
         }];
-        
+
         // If not focused on Diff, height should be 6
         tui.focus = Focus::Input;
         let diff_height_unfocused = if tui.diff_hunks.is_empty() {
@@ -2924,7 +3601,7 @@ mod tests {
     #[tokio::test]
     async fn test_opencode_dynamic_connect() {
         let mut tui = test_tui();
-        
+
         // Mock opencode config
         let mut prov_map = HashMap::new();
         prov_map.insert(
@@ -2952,38 +3629,43 @@ mod tests {
         assert_eq!(resolved_key, "custom_key");
 
         // 2. Test create provider
-        let provider = tui.create_tui_provider("custom-prov", "custom-model", "").unwrap();
+        let provider = tui
+            .create_tui_provider("custom-prov", "custom-model", "")
+            .unwrap();
         assert_eq!(provider.model(), "custom-model");
 
         // 3. Test slash command /connect with provider/model format
         tui.input = "/connect custom-prov/custom-model".to_string();
         tui.cursor = tui.input.len();
-        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())).await;
-        
+        tui.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
         assert_eq!(tui.provider.model(), "custom-model");
     }
 
     #[tokio::test]
     async fn test_dump_tui_rendering() {
         let mut tui = test_tui();
-        tui.add_entry(ConversationEntry::User("hello agent, please help me fix the layout.".to_string()));
+        tui.add_entry(ConversationEntry::User(
+            "hello agent, please help me fix the layout.".to_string(),
+        ));
         tui.add_entry(ConversationEntry::Assistant("I am editing simple_tui.rs to improve alignment and layout.\nHere is the diff of the changes:".to_string()));
-        tui.add_entry(ConversationEntry::System("Verification tests passed successfully.".to_string()));
-        tui.diff_hunks = vec![
-            DiffHunk {
-                file_path: "src/main.rs".to_string(),
-                header: "@@ -1,5 +1,6 @@".to_string(),
-                removals: vec!["println!(\"old content\");".to_string()],
-                additions: vec!["println!(\"new layout content\");".to_string()],
-                state: HunkState::Pending,
-            }
-        ];
-        
+        tui.add_entry(ConversationEntry::System(
+            "Verification tests passed successfully.".to_string(),
+        ));
+        tui.diff_hunks = vec![DiffHunk {
+            file_path: "src/main.rs".to_string(),
+            header: "@@ -1,5 +1,6 @@".to_string(),
+            removals: vec!["println!(\"old content\");".to_string()],
+            additions: vec!["println!(\"new layout content\");".to_string()],
+            state: HunkState::Pending,
+        }];
+
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        
+
         terminal.draw(|f| tui.render(f)).unwrap();
-        
+
         let mut dump = String::new();
         let buffer = terminal.backend().buffer();
         for y in 0..24 {
@@ -2993,7 +3675,8 @@ mod tests {
             }
             dump.push('\n');
         }
-        
-        std::fs::write("/home/syr/.gemini/antigravity-cli/brain/3a9239d8-12f5-4511-81f3-ee325c94e554/scratch/tui_dump.txt", dump).unwrap();
+
+        let dump_path = std::env::temp_dir().join("tui_dump.txt");
+        let _ = std::fs::write(dump_path, dump);
     }
 }

@@ -124,11 +124,13 @@ impl GeminiProvider {
             })
             .collect();
 
-        let usage = gemini_response.usage_metadata.map(|u| crate::types::TokenUsage {
-            prompt_tokens: u.prompt_token_count,
-            completion_tokens: u.candidates_token_count,
-            total_tokens: u.total_token_count,
-        });
+        let usage = gemini_response
+            .usage_metadata
+            .map(|u| crate::types::TokenUsage {
+                prompt_tokens: u.prompt_token_count,
+                completion_tokens: u.candidates_token_count,
+                total_tokens: u.total_token_count,
+            });
 
         Ok(ChatResponse {
             content,
