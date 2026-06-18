@@ -24,9 +24,27 @@ use exec::{run_exec, ExecConfig};
 #[derive(Parser, Debug)]
 #[command(name = "forge")]
 #[command(author, version, about, long_about = None)]
+#[command(subcommand_required = false)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+}
+
+fn default_repl_command() -> Commands {
+    Commands::Repl {
+        project_path: ".".to_string(),
+        config: "forge.toml".to_string(),
+        api_key: None,
+        provider: "zai".to_string(),
+        model: "glm-5.1".to_string(),
+        network: "off".to_string(),
+        watch: false,
+        resume: None,
+        session: None,
+        tui: false,
+        plain: false,
+        yolo: false,
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -368,7 +386,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
+    match cli.command.unwrap_or_else(default_repl_command) {
         Commands::Repl {
             project_path,
             config: _,
